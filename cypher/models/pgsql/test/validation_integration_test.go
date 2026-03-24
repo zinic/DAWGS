@@ -1,4 +1,4 @@
-//go:build manual_integration
+///go:build manual_integration
 
 package test
 
