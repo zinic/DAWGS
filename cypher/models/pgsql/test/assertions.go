@@ -185,4 +185,3 @@ func AssertAll(assertions ...ResultAssertion) ResultAssertion {
 		}
 	}
 }
-
