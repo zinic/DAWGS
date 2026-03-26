@@ -30,6 +30,13 @@ func rewriteIdentifierScopeReference(scope *Scope, identifier pgsql.Identifier) 
 func rewriteCompoundIdentifierScopeReference(scope *Scope, identifier pgsql.CompoundIdentifier) (pgsql.SelectItem, error) {
 	if binding, bound := scope.Lookup(identifier[0]); bound {
 		if binding.LastProjection != nil {
+			// For NodeComposite.id references, use the flat id column so join conditions
+			// remain plain integer comparisons that are eligible for index probes.
+			if binding.DataType == pgsql.NodeComposite && identifier[1] == pgsql.ColumnID && binding.HasFlatID {
+				flatIDName := pgsql.Identifier(string(binding.Identifier) + "_id")
+				return pgsql.CompoundIdentifier{binding.LastProjection.Binding.Identifier, flatIDName}, nil
+			}
+
 			return pgsql.RowColumnReference{
 				Identifier: pgsql.CompoundIdentifier{binding.LastProjection.Binding.Identifier, binding.Identifier},
 				Column:     identifier[1],

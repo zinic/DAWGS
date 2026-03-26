@@ -1,4 +1,4 @@
-//go:build integration
+//go:build neo4j_integration
 
 package neo4j_test
 
@@ -18,7 +18,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-const Neo4jConnectionStringEnv = "NEO4J_CONNECTION"
+const Neo4jConnectionStringEnv = "NEO4J_CONNECTION_STRING"
 
 var (
 	NodeKind1 = graph.StringKind("NodeKind1")

@@ -33,3 +33,46 @@ development processes.
 ```bash
 make
 ```
+
+#### Integration Tests
+
+Integration tests are excluded from the default `make` target and require a running database instance. They are
+selected via Go build tags and configured through environment variables.
+
+##### PostgreSQL Integration Tests
+
+The following tests require a live PostgreSQL instance:
+
+- `cypher/models/pgsql/test/translation_integration_test.go`
+- `cypher/models/pgsql/test/semantic_integration_test.go`
+
+Set the `PG_CONNECTION_STRING` environment variable to a valid PostgreSQL connection string (e.g. `user=postgres dbname=bhe password=bhe4eva host=localhost`), then run:
+
+```bash
+PG_CONNECTION_STRING="<connection-string>" make test_pg
+```
+
+To run a specific test directly:
+
+```bash
+PG_CONNECTION_STRING="<connection-string>" go test -tags pg_integration ./cypher/models/pgsql/test/...
+```
+
+##### Neo4j Integration Tests
+
+The following test requires a live Neo4j instance:
+
+- `drivers/neo4j/batch_integration_test.go`
+
+Set the `NEO4J_CONNECTION_STRING` environment variable to a valid Neo4j connection string (e.g.
+`neo4j://user:password@host:port`), then run:
+
+```bash
+NEO4J_CONNECTION_STRING="<connection-string>" make test_neo4j
+```
+
+To run the batch integration test directly:
+
+```bash
+NEO4J_CONNECTION_STRING="<connection-string>" go test -tags neo4j_integration ./drivers/neo4j/...
+```

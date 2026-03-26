@@ -1,4 +1,4 @@
-//go:build manual_integration
+//go:build pg_integration
 
 package test
 
@@ -14,10 +14,6 @@ import (
 	"github.com/specterops/dawgs/graph"
 	"github.com/specterops/dawgs/util/size"
 	"github.com/stretchr/testify/require"
-)
-
-const (
-	PGConnectionStringEV = "PG_CONNECTION_STRING"
 )
 
 func TestTranslationTestCases(t *testing.T) {

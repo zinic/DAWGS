@@ -45,10 +45,11 @@ func buildExternalProjection(scope *Scope, projections []*Projection) (pgsql.Pro
 
 				if builtProjection, err := buildProjection(alias, projectedBinding, scope, projectedBinding.LastProjection); err != nil {
 					return nil, err
-				} else {
-					for _, buildProjectionItem := range builtProjection {
-						sqlProjection = append(sqlProjection, buildProjectionItem)
-					}
+				} else if len(builtProjection) > 0 {
+					// Only include the first item: the composite value itself. Any additional items
+					// (e.g. the flat ID column used internally for edge join acceleration) are
+					// implementation details and must not appear in the final result projection.
+					sqlProjection = append(sqlProjection, builtProjection[0])
 				}
 			}
 
@@ -243,58 +244,83 @@ func buildProjectionForPathComposite(alias pgsql.Identifier, projected *BoundIde
 }
 
 func buildProjectionForExpansionNode(alias pgsql.Identifier, projected *BoundIdentifier, referenceFrame *Frame) ([]pgsql.SelectItem, error) {
+	flatIDAlias := pgsql.Identifier(string(projected.Identifier) + "_id")
+
 	if projected.LastProjection != nil {
-		return []pgsql.SelectItem{
+		// Pass-through: carry both the composite and its flat id from the previous frame if bound.
+		items := []pgsql.SelectItem{
 			&pgsql.AliasedExpression{
 				Expression: pgsql.CompoundIdentifier{referenceFrame.Binding.Identifier, projected.Identifier},
 				Alias:      pgsql.AsOptionalIdentifier(alias),
 			},
-		}, nil
+		}
+
+		if projected.HasFlatID {
+			items = append(items, &pgsql.AliasedExpression{
+				Expression: pgsql.CompoundIdentifier{referenceFrame.Binding.Identifier, flatIDAlias},
+				Alias:      models.OptionalValue(flatIDAlias),
+			})
+		}
+
+		return items, nil
 	}
 
-	value := pgsql.CompositeValue{
-		DataType: pgsql.NodeComposite,
-	}
-
+	value := pgsql.CompositeValue{DataType: pgsql.NodeComposite}
 	for _, nodeTableColumn := range pgsql.NodeTableColumns {
 		value.Values = append(value.Values, pgsql.CompoundIdentifier{projected.Identifier, nodeTableColumn})
 	}
 
-	// Change the type to the node composite now that this is projected
 	projected.DataType = pgsql.NodeComposite
+	projected.HasFlatID = true
 
-	// Create a new final projection that's aliased to the visible binding's identifier
 	return []pgsql.SelectItem{
+		&pgsql.AliasedExpression{Expression: value, Alias: pgsql.AsOptionalIdentifier(alias)},
 		&pgsql.AliasedExpression{
-			Expression: value,
-			Alias:      pgsql.AsOptionalIdentifier(alias),
+			Expression: pgsql.CompoundIdentifier{projected.Identifier, pgsql.ColumnID},
+			Alias:      models.OptionalValue(flatIDAlias),
 		},
 	}, nil
 }
 
 func buildProjectionForNodeComposite(alias pgsql.Identifier, projected *BoundIdentifier, referenceFrame *Frame) ([]pgsql.SelectItem, error) {
+	flatIDAlias := pgsql.Identifier(string(projected.Identifier) + "_id")
+
 	if projected.LastProjection != nil {
-		return []pgsql.SelectItem{
+		// Pass-through: carry both the composite and its flat id from the previous frame if bound.
+		items := []pgsql.SelectItem{
 			&pgsql.AliasedExpression{
 				Expression: pgsql.CompoundIdentifier{referenceFrame.Binding.Identifier, projected.Identifier},
 				Alias:      pgsql.AsOptionalIdentifier(alias),
 			},
-		}, nil
+		}
+
+		if projected.HasFlatID {
+			items = append(items, &pgsql.AliasedExpression{
+				Expression: pgsql.CompoundIdentifier{referenceFrame.Binding.Identifier, flatIDAlias},
+				Alias:      models.OptionalValue(flatIDAlias),
+			})
+		}
+
+		return items, nil
 	}
 
-	value := pgsql.CompositeValue{
-		DataType: pgsql.NodeComposite,
-	}
-
+	// First materialization: project composite + flat id column
+	value := pgsql.CompositeValue{DataType: pgsql.NodeComposite}
 	for _, nodeTableColumn := range pgsql.NodeTableColumns {
 		value.Values = append(value.Values, pgsql.CompoundIdentifier{projected.Identifier, nodeTableColumn})
 	}
 
-	// Create a new final projection that's aliased to the visible binding's identifier
+	projected.DataType = pgsql.NodeComposite
+	projected.HasFlatID = true
+
 	return []pgsql.SelectItem{
 		&pgsql.AliasedExpression{
 			Expression: value,
 			Alias:      pgsql.AsOptionalIdentifier(alias),
+		},
+		&pgsql.AliasedExpression{
+			Expression: pgsql.CompoundIdentifier{projected.Identifier, pgsql.ColumnID},
+			Alias:      models.OptionalValue(flatIDAlias),
 		},
 	}, nil
 }

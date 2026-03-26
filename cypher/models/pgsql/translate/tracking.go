@@ -354,6 +354,7 @@ type BoundIdentifier struct {
 	LastProjection *Frame
 	Dependencies   []*BoundIdentifier
 	DataType       pgsql.DataType
+	HasFlatID      bool // true if a flat <name>_id column was projected alongside the composite
 }
 
 func (s *BoundIdentifier) MaterializedBy(frame *Frame) {
@@ -371,6 +372,7 @@ func (s *BoundIdentifier) Copy() *BoundIdentifier {
 		LastProjection: s.LastProjection,
 		Dependencies:   dependenciesCopy,
 		DataType:       s.DataType,
+		HasFlatID:      s.HasFlatID,
 	}
 }
 

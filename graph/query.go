@@ -1,6 +1,8 @@
 package graph
 
-import "fmt"
+import (
+	"fmt"
+)
 
 type Result interface {
 	Next() bool
@@ -19,16 +21,20 @@ type Result interface {
 
 func ScanNextResult(result Result, targets ...any) error {
 	var (
-		nextTargetIdx = 0
-		mapper        = result.Mapper()
+		mapper = result.Mapper()
+		values = result.Values()
 	)
 
-	for _, nextValue := range result.Values() {
-		if !mapper.Map(nextValue, targets[nextTargetIdx]) {
-			return fmt.Errorf("unable to marshal next value %T into target %T", nextValue, targets[nextTargetIdx])
-		}
+	if len(targets) != len(values) {
+		return fmt.Errorf("attempting to map %d results into %d targets", len(values), len(targets))
+	}
 
-		nextTargetIdx++
+	for idx := range values {
+		nextValue := values[idx]
+
+		if !mapper.Map(nextValue, targets[idx]) {
+			return fmt.Errorf("unable to marshal next value %T into target %T", nextValue, targets[idx])
+		}
 	}
 
 	return nil

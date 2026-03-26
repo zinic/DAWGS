@@ -3,6 +3,7 @@ package translate
 import (
 	"fmt"
 
+	"github.com/specterops/dawgs/cypher/models"
 	"github.com/specterops/dawgs/cypher/models/pgsql"
 )
 
@@ -21,6 +22,10 @@ func (s *Translator) translateWith() error {
 			// groupByItems is a set of symbols (identifiers and compound identifiers) that the query is expected to
 			// group by. This is built by exclusion of all aggregated items.
 			groupByItems = pgsql.NewSymbolTable()
+
+			// extraProjections collects flat _id projections to append after the main loop, so they
+			// are not processed by the loop's switch and do not affect groupByItems calculation.
+			extraProjections []*Projection
 		)
 
 		for _, projectionItem := range currentPart.projections.Items {
@@ -75,16 +80,38 @@ func (s *Translator) translateWith() error {
 					// Track this projected item for scope pruning
 					projectedItems.Add(binding.Identifier)
 
+					// Capture previous frame info before materializing.
+					prevFrameIdent := binding.LastProjection.Binding.Identifier
+					hadFlatID := binding.HasFlatID
+
 					// Create a new projection that maps the identifier
 					currentPart.projections.Items[idx] = &Projection{
 						SelectItem: pgsql.CompoundIdentifier{
-							binding.LastProjection.Binding.Identifier, typedSelectItem,
+							prevFrameIdent, typedSelectItem,
 						},
 						Alias: pgsql.AsOptionalIdentifier(binding.Identifier),
 					}
 
 					// Assign the frame to the binding's last projection backref
 					binding.MaterializedBy(currentPart.Frame)
+
+					// If the binding had a flat _id column projected in the previous frame, carry it
+					// through using a composite field dereference: (prevFrame.node).id. This form is
+					// functionally dependent on the GROUP BY key (the node column) so PostgreSQL
+					// accepts it in both aggregated and non-aggregated contexts.
+					if hadFlatID {
+						flatIDAlias := pgsql.Identifier(string(binding.Identifier) + "_id")
+						extraProjections = append(extraProjections, &Projection{
+							SelectItem: pgsql.RowColumnReference{
+								Identifier: pgsql.CompoundIdentifier{prevFrameIdent, binding.Identifier},
+								Column:     pgsql.ColumnID,
+							},
+							Alias: models.OptionalValue(flatIDAlias),
+						})
+						// Keep HasFlatID = true so downstream frames continue using the flat-id channel.
+					} else {
+						binding.HasFlatID = false
+					}
 
 					// Reveal and export the identifier in the current multipart query part's frame
 					currentPart.Frame.Reveal(binding.Identifier)
@@ -115,6 +142,10 @@ func (s *Translator) translateWith() error {
 				}
 			}
 		}
+
+		// Append flat _id projections collected during the loop. They must be appended after the loop
+		// so they do not affect groupByItems construction or trigger the loop's switch statement.
+		currentPart.projections.Items = append(currentPart.projections.Items, extraProjections...)
 
 		if !aggregatedItems.IsEmpty() {
 			groupByItems.EachIdentifier(func(next pgsql.Identifier) bool {

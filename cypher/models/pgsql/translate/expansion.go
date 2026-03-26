@@ -11,6 +11,19 @@ import (
 
 const translateDefaultMaxTraversalDepth int64 = 15
 
+// nodeIDRef returns a reference to the ID of a node binding within the given frame.
+// When the binding carries a projected flat ID column (HasFlatID = true) the reference
+// resolves to a plain compound identifier like s0.n0_id, which lets the planner use a
+// direct index scan. When HasFlatID is false (e.g. after a WITH carry-through) it falls
+// back to the composite field dereference (frame.node).id.
+func nodeIDRef(frameID pgsql.Identifier, node *BoundIdentifier) pgsql.Expression {
+	if node.HasFlatID {
+		return pgsql.CompoundIdentifier{frameID, pgsql.Identifier(string(node.Identifier) + "_id")}
+	}
+
+	return rewriteCompositeTypeFieldReference(frameID, pgsql.CompoundIdentifier{node.Identifier, pgsql.ColumnID})
+}
+
 func expansionEdgeJoinCondition(traversalStep *TraversalStep) (pgsql.Expression, error) {
 	return pgd.Equals(
 		pgd.EntityID(traversalStep.LeftNode.Identifier),
@@ -539,12 +552,8 @@ func (s *ExpansionBuilder) buildShortestPathsHarnessCall(harnessFunctionName pgs
 			},
 		}}, projectionQuery.From...)
 
-		// (s0.n1).id = s2.root_id
 		projectionQuery.Where = pgsql.NewBinaryExpression(
-			pgsql.RowColumnReference{
-				Identifier: pgsql.CompoundIdentifier{prevFrameID, s.traversalStep.LeftNode.Identifier},
-				Column:     pgsql.ColumnID,
-			},
+			nodeIDRef(prevFrameID, s.traversalStep.LeftNode),
 			pgsql.OperatorEquals,
 			pgsql.CompoundIdentifier{expansionModel.Frame.Binding.Identifier, expansionRootID},
 		)
@@ -630,12 +639,8 @@ func (s *ExpansionBuilder) BuildBiDirectionalAllShortestPathsRoot() (pgsql.Query
 			},
 		}}, projectionQuery.From...)
 
-		// (s0.n1).id = s2.root_id
 		projectionQuery.Where = pgsql.NewBinaryExpression(
-			pgsql.RowColumnReference{
-				Identifier: pgsql.CompoundIdentifier{prevFrameID, s.traversalStep.LeftNode.Identifier},
-				Column:     pgsql.ColumnID,
-			},
+			nodeIDRef(prevFrameID, s.traversalStep.LeftNode),
 			pgsql.OperatorEquals,
 			pgsql.CompoundIdentifier{expansionModel.Frame.Binding.Identifier, expansionRootID},
 		)
@@ -837,10 +842,7 @@ func (s *Translator) buildExpansionPatternRoot(traversalStepContext TraversalSte
 					Constraint: pgsql.NewBinaryExpression(
 						pgsql.CompoundIdentifier{traversalStep.Edge.Identifier, pgsql.ColumnStartID},
 						pgsql.OperatorEquals,
-						rewriteCompositeTypeFieldReference(
-							traversalStep.Frame.Previous.Binding.Identifier,
-							pgsql.CompoundIdentifier{traversalStep.LeftNode.Identifier, pgsql.ColumnID},
-						)),
+						nodeIDRef(traversalStep.Frame.Previous.Binding.Identifier, traversalStep.LeftNode)),
 				},
 			}},
 		}
@@ -1223,10 +1225,7 @@ func (s *Translator) buildExpansionProjectionConstraints(traversalStepContext Tr
 
 	if previousStep != nil {
 		joinCondition = pgd.Equals(
-			pgsql.RowColumnReference{
-				Identifier: pgsql.CompoundIdentifier{previousStep.Frame.Binding.Identifier, currentStep.LeftNode.Identifier},
-				Column:     pgsql.ColumnID,
-			},
+			nodeIDRef(previousStep.Frame.Binding.Identifier, currentStep.LeftNode),
 			pgd.Column(expansionModel.Frame.Binding.Identifier, expansionRootID),
 		)
 	}

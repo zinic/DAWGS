@@ -1,19 +1,3 @@
-// Copyright 2026 Specter Ops, Inc.
-//
-// Licensed under the Apache License, Version 2.0
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-//
-// SPDX-License-Identifier: Apache-2.0
-
 package test
 
 import (
@@ -54,12 +38,29 @@ func newBufferedResult(r graph.Result) *bufferedResult {
 	return br
 }
 
-func (b *bufferedResult) Reset()                    { b.current = -1 }
-func (b *bufferedResult) Next() bool                { b.current++; return b.current < len(b.rows) }
-func (b *bufferedResult) Keys() []string            { return b.keys }
-func (b *bufferedResult) Mapper() graph.ValueMapper { return b.mapper }
-func (b *bufferedResult) Error() error              { return b.err }
-func (b *bufferedResult) Close()                    {}
+func (b *bufferedResult) Reset() {
+	b.current = -1
+}
+
+func (b *bufferedResult) Next() bool {
+	b.current++
+	return b.current < len(b.rows)
+}
+
+func (b *bufferedResult) Keys() []string {
+	return b.keys
+}
+
+func (b *bufferedResult) Mapper() graph.ValueMapper {
+	return b.mapper
+}
+
+func (b *bufferedResult) Error() error {
+	return b.err
+}
+
+func (b *bufferedResult) Close() {
+}
 
 func (b *bufferedResult) Values() []any {
 	if b.current < 0 || b.current >= len(b.rows) {

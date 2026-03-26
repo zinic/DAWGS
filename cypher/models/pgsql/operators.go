@@ -86,6 +86,7 @@ const (
 	OperatorIn                    Operator = "in"
 	OperatorIs                    Operator = "is"
 	OperatorIsNot                 Operator = "is not"
+	OperatorIsNotDistinctFrom     Operator = "is not distinct from"
 	OperatorSimilarTo             Operator = "similar to"
 	OperatorRegexMatch            Operator = "~"
 	OperatorAssignment            Operator = "="

@@ -68,7 +68,10 @@ func (s *Translator) translateOptionalMatch() error {
 
 	// For each identifier that is exported by our new frame, update which frame
 	// last materialized the identifier, so that references in future and final projections
-	// are corrected
+	// are corrected.
+	// HasFlatID is intentionally preserved: buildOptionalMatchAggregationStep carries the
+	// scalar _id column through the aggregation frame for every binding that had one, so
+	// downstream frames can continue to use the flat-id side channel.
 	for _, exported := range aggrFrame.Exported.Slice() {
 		if boundIdent, exists := s.scope.Lookup(exported); exists {
 			boundIdent.MaterializedBy(aggrFrame)
@@ -92,16 +95,23 @@ func (s *Translator) buildOptionalMatchAggregationStep(aggregationFrame *Frame) 
 		return pgsql.Query{}, fmt.Errorf("could not get origin frame prior to OPTIONAL MATCH")
 	}
 
-	// Construct the join condition based on exports from the "origin" frame
+	// Construct the join condition based on exports from the "origin" frame.
 	// We expect the OPTIONAL MATCH frame to also export the same, so that becomes
-	// our join anchor between the two CTEs
+	// our join anchor between the two CTEs.
+	//
+	// IS NOT DISTINCT FROM is used instead of = because, in a chain of OPTIONAL MATCHes,
+	// the origin frame may itself be the result of a prior left-outer join.  Any binding
+	// that was absent in the previous optional match will be NULL in the origin frame, and
+	// NULL = NULL evaluates to NULL (false), which would silently drop rows whose second
+	// optional match depends only on a non-optional binding.  IS NOT DISTINCT FROM treats
+	// two NULLs as equal and so preserves those rows correctly.
 	var joinConstraints pgsql.Expression
 	for _, exported := range originFrame.Exported.Slice() {
 		joinConstraints = pgsql.OptionalAnd(
 			pgsql.NewParenthetical(
 				pgsql.NewBinaryExpression(
 					pgsql.CompoundIdentifier{originFrame.Binding.Identifier, exported},
-					pgsql.OperatorEquals,
+					pgsql.OperatorIsNotDistinctFrom,
 					pgsql.CompoundIdentifier{optMatchFrame.Binding.Identifier, exported},
 				),
 			),
@@ -109,8 +119,9 @@ func (s *Translator) buildOptionalMatchAggregationStep(aggregationFrame *Frame) 
 		)
 	}
 
-	// Construct the projection for this frame. Just take all of the exports for the "origin" frame
-	// and optional match frame and re-export them
+	// Construct the projection for this frame. Take all of the exports for the "origin" frame
+	// and optional match frame and re-export them, including scalar _id columns so that
+	// downstream frames can continue to use the flat-id side channel.
 	// TODO: Does there need to be additional logic for visible/defined bindings, instead of only exports?
 	originIDExclusions := map[string]struct{}{}
 	projection := pgsql.Projection{}
@@ -119,12 +130,22 @@ func (s *Translator) buildOptionalMatchAggregationStep(aggregationFrame *Frame) 
 			Expression: pgsql.CompoundIdentifier{originFrame.Binding.Identifier, exported},
 			Alias:      pgsql.AsOptionalIdentifier(exported),
 		})
+
+		// Carry the flat scalar id column through if the binding had one projected.
+		if boundIdent, exists := s.scope.Lookup(exported); exists && boundIdent.HasFlatID {
+			flatIDAlias := pgsql.Identifier(string(exported) + "_id")
+			projection = append(projection, &pgsql.AliasedExpression{
+				Expression: pgsql.CompoundIdentifier{originFrame.Binding.Identifier, flatIDAlias},
+				Alias:      pgsql.AsOptionalIdentifier(flatIDAlias),
+			})
+		}
+
 		originIDExclusions[exported.String()] = struct{}{}
 		aggregationFrame.Export(exported)
 	}
 	for _, exported := range optMatchFrame.Exported.Slice() {
 		// Optional match frame would shadow the origin frame's export with a filtered
-		// view of the origin's exports, so make sure not to shadow them
+		// view of the origin's exports, so make sure not to shadow them.
 		if _, ok := originIDExclusions[exported.String()]; ok {
 			continue
 		}
@@ -133,6 +154,16 @@ func (s *Translator) buildOptionalMatchAggregationStep(aggregationFrame *Frame) 
 			Expression: pgsql.CompoundIdentifier{optMatchFrame.Binding.Identifier, exported},
 			Alias:      pgsql.AsOptionalIdentifier(exported),
 		})
+
+		// Carry the flat scalar id column through if the binding had one projected.
+		if boundIdent, exists := s.scope.Lookup(exported); exists && boundIdent.HasFlatID {
+			flatIDAlias := pgsql.Identifier(string(exported) + "_id")
+			projection = append(projection, &pgsql.AliasedExpression{
+				Expression: pgsql.CompoundIdentifier{optMatchFrame.Binding.Identifier, flatIDAlias},
+				Alias:      pgsql.AsOptionalIdentifier(flatIDAlias),
+			})
+		}
+
 		aggregationFrame.Export(exported)
 	}
 
