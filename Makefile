@@ -49,7 +49,7 @@ test_pg:
 
 test_update:
 	@echo "Updating test cases..."
-	@CYSQL_UPDATE_CASES=true $(GO_CMD) test -parallel=10 $(MAIN_PACKAGES)
+	@CYSQL_UPDATE_CASES=true $(GO_CMD) test -parallel=10 $(MAIN_PACKAGES) >>/dev/null 2>&1|| true
 
 	@cp -fv cypher/analyzer/updated_cases/* cypher/test/cases
 	@rm -rf cypher/analyzer/updated_cases/
