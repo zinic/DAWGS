@@ -160,6 +160,16 @@ retriever verify \
   -in ./dumpdir
 ```
 
+Encrypted archives produced by `dump -archive-out` can also be verified
+directly:
+
+```bash
+retriever verify \
+  -connection "$CONNECTION_STRING" \
+  -archive ./dump.tar.pq \
+  -identity ./retriever-private.key
+```
+
 Verification reads expected metrics from `manifest.json`, computes actual
 metrics from the destination graph database, and compares them strictly. A
 successful run prints the verified graph, node, and relationship counts. A

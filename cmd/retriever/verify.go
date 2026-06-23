@@ -29,9 +29,12 @@ func (s metricsMismatchError) Error() string {
 }
 
 func Verify(ctx context.Context, db graph.Database, driverName string, options verifyOptions) (verifyResult, error) {
-	if err := options.validate(); err != nil {
+	preparedOptions, cleanupInput, err := prepareVerifyInput(options)
+	if err != nil {
 		return verifyResult{}, err
 	}
+	defer cleanupInput()
+	options = preparedOptions
 
 	startedAt := time.Now()
 	slog.Info("retriever verify started",
@@ -83,6 +86,31 @@ func Verify(ctx context.Context, db graph.Database, driverName string, options v
 		slog.Duration("wall_elapsed", time.Since(startedAt)),
 	)
 	return result, nil
+}
+
+func prepareVerifyInput(options verifyOptions) (verifyOptions, func(), error) {
+	if err := options.validate(); err != nil {
+		return verifyOptions{}, nil, err
+	}
+	options.InputDir = strings.TrimSpace(options.InputDir)
+	options.ArchivePath = strings.TrimSpace(options.ArchivePath)
+	options.IdentityPath = strings.TrimSpace(options.IdentityPath)
+	if options.ArchivePath == "" {
+		return options, func() {}, nil
+	}
+
+	inputDir, cleanup, err := prepareCollectionInput("verify", options.InputDir, options.ArchivePath, options.IdentityPath)
+	if err != nil {
+		return verifyOptions{}, nil, err
+	}
+	options.InputDir = inputDir
+	options.ArchivePath = ""
+	options.IdentityPath = ""
+	if err := options.validate(); err != nil {
+		cleanup()
+		return verifyOptions{}, nil, err
+	}
+	return options, cleanup, nil
 }
 
 func collectDatabaseMetrics(ctx context.Context, db graph.Database, graphEntries []graphManifest, batchSize int) (metricsManifest, verifyResult, error) {

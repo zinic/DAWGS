@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -200,35 +199,11 @@ func prepareLoadInput(options loadOptions) (loadOptions, func(), error) {
 		return options, func() {}, nil
 	}
 
-	identity, err := loadArchivePrivateKey(options.IdentityPath)
+	inputDir, cleanup, err := prepareCollectionInput("load", options.InputDir, options.ArchivePath, options.IdentityPath)
 	if err != nil {
 		return loadOptions{}, nil, err
 	}
-	tempDir, err := os.MkdirTemp("", "retriever-load-archive-*")
-	if err != nil {
-		return loadOptions{}, nil, fmt.Errorf("create load archive temp directory: %w", err)
-	}
-	cleanup := func() {
-		_ = os.RemoveAll(tempDir)
-	}
-	file, err := os.Open(options.ArchivePath)
-	if err != nil {
-		cleanup()
-		return loadOptions{}, nil, fmt.Errorf("open archive: %w", err)
-	}
-	defer file.Close()
-
-	slog.Info("retriever load archive unpacking started",
-		slog.String("archive", options.ArchivePath),
-	)
-	if err := unpackEncryptedCollectionArchiveToDirectory(file, tempDir, identity); err != nil {
-		cleanup()
-		return loadOptions{}, nil, err
-	}
-	slog.Info("retriever load archive unpacking completed",
-		slog.String("archive", options.ArchivePath),
-	)
-	options.InputDir = tempDir
+	options.InputDir = inputDir
 	options.ArchivePath = ""
 	options.IdentityPath = ""
 	if err := options.validate(); err != nil {

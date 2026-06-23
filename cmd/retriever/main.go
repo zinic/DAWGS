@@ -243,15 +243,20 @@ func (s commandRuntime) runVerify(ctx context.Context, args []string) error {
 	flags.SetOutput(s.stderr)
 	commonDatabaseFlags(flags, &cfg.Database)
 	flags.StringVar(&cfg.InputDir, "in", "", "Input collection directory.")
+	flags.StringVar(&cfg.ArchivePath, "archive", "", "Encrypted archive input path.")
+	flags.StringVar(&cfg.IdentityPath, "identity", "", "Recipient private key path for -archive.")
 	flags.IntVar(&cfg.BatchSize, "batch-size", cfg.BatchSize, "Database read batch size.")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 
 	fillConnectionFromEnv(&cfg.Database)
-	if err := cfg.validate(); err != nil {
+	preparedCfg, cleanupInput, err := prepareVerifyInput(cfg)
+	if err != nil {
 		return err
 	}
+	defer cleanupInput()
+	cfg = preparedCfg
 
 	db, driverName, err := openDatabase(ctx, cfg.Database)
 	if err != nil {

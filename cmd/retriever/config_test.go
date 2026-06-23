@@ -145,6 +145,25 @@ func TestOptionsValidate(t *testing.T) {
 	if err := verify.validate(); err == nil {
 		t.Fatalf("expected invalid verify batch size")
 	}
+	verify = verifyOptions{
+		ArchivePath:  filepath.Join(t.TempDir(), "dump.tar.pq"),
+		IdentityPath: filepath.Join(t.TempDir(), "private.key"),
+		BatchSize:    1,
+	}
+	if err := verify.validate(); err != nil {
+		t.Fatalf("valid verify archive options: %v", err)
+	}
+	verify.InputDir = t.TempDir()
+	if err := verify.validate(); err == nil {
+		t.Fatalf("expected mutually exclusive verify input error")
+	}
+	verify = verifyOptions{
+		ArchivePath: filepath.Join(t.TempDir(), "dump.tar.pq"),
+		BatchSize:   1,
+	}
+	if err := verify.validate(); err == nil {
+		t.Fatalf("expected missing verify identity path")
+	}
 
 	bench := benchOptions{
 		Workers:    []int{1},
