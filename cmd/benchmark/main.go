@@ -93,18 +93,6 @@ func main() {
 		fatal("failed to open database: %v", err)
 	}
 	defer db.Close(ctx)
-	if *driver == pg.DriverName {
-		pgDB, ok := db.(*pg.Driver)
-		if !ok {
-			fatal("expected *pg.Driver, got %T", db)
-		}
-		health, err := pgDB.Readiness(ctx)
-		if err != nil {
-			fatal("PostgreSQL readiness failed: %v", err)
-		}
-		postgresHealth = &health
-	}
-
 	// Build dataset list
 	var datasets []string
 	if *onlyDataset != "" {
@@ -130,6 +118,17 @@ func main() {
 
 	if err := db.AssertSchema(ctx, schema); err != nil {
 		fatal("failed to assert schema: %v", err)
+	}
+	if *driver == pg.DriverName {
+		pgDB, ok := db.(*pg.Driver)
+		if !ok {
+			fatal("expected *pg.Driver, got %T", db)
+		}
+		health, err := pgDB.Readiness(ctx)
+		if err != nil {
+			fatal("PostgreSQL readiness failed: %v", err)
+		}
+		postgresHealth = &health
 	}
 
 	var runOptions RunOptions

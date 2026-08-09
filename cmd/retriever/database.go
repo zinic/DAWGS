@@ -78,17 +78,10 @@ func openDatabase(ctx context.Context, cfg databaseConfig) (graph.Database, stri
 			_ = db.Close(ctx)
 		}
 	}()
-	if driverName == pg.DriverName {
-		pgDriver, ok := db.(*pg.Driver)
-		if !ok {
-			return nil, "", fmt.Errorf("expected *pg.Driver, got %T", db)
-		}
-		if _, err := pgDriver.Readiness(ctx); err != nil {
-			return nil, "", fmt.Errorf("PostgreSQL readiness: %w", err)
-		}
-	}
-
 	if graphName := strings.TrimSpace(cfg.Graph); graphName != "" {
+		if err := assertPostgresRuntime(ctx, db, driverName); err != nil {
+			return nil, "", err
+		}
 		if err := db.SetDefaultGraph(ctx, graph.Graph{
 			Name: graphName,
 		}); err != nil {
@@ -99,6 +92,20 @@ func openDatabase(ctx context.Context, cfg databaseConfig) (graph.Database, stri
 	openSuccess = true
 
 	return db, driverName, nil
+}
+
+func assertPostgresRuntime(ctx context.Context, db graph.Database, driverName string) error {
+	if driverName != pg.DriverName {
+		return nil
+	}
+	pgDriver, ok := db.(*pg.Driver)
+	if !ok {
+		return fmt.Errorf("expected *pg.Driver, got %T", db)
+	}
+	if err := pgDriver.AssertRuntime(ctx); err != nil {
+		return fmt.Errorf("PostgreSQL startup validation: %w", err)
+	}
+	return nil
 }
 
 func driverFromConnectionString(connection string) (string, error) {

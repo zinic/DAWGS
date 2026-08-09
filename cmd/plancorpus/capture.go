@@ -187,18 +187,6 @@ func openBackend(ctx context.Context, suite corpus, spec captureSpec) (*backendC
 		return nil, fmt.Errorf("open %s database: %w", spec.DriverName, err)
 	}
 	var postgresHealth pg.LayoutHealth
-	if spec.DriverName == pg.DriverName {
-		pgDriver, ok := db.(*pg.Driver)
-		if !ok {
-			_ = db.Close(ctx)
-			return nil, fmt.Errorf("expected *pg.Driver, got %T", db)
-		}
-		postgresHealth, err = pgDriver.Readiness(ctx)
-		if err != nil {
-			_ = db.Close(ctx)
-			return nil, fmt.Errorf("PostgreSQL readiness: %w", err)
-		}
-	}
 
 	schema := graph.Schema{
 		Graphs: []graph.Graph{{
@@ -211,6 +199,14 @@ func openBackend(ctx context.Context, suite corpus, spec captureSpec) (*backendC
 	if err := db.AssertSchema(ctx, schema); err != nil {
 		_ = db.Close(ctx)
 		return nil, fmt.Errorf("assert schema: %w", err)
+	}
+	if spec.DriverName == pg.DriverName {
+		pgDriver := db.(*pg.Driver)
+		postgresHealth, err = pgDriver.Readiness(ctx)
+		if err != nil {
+			_ = db.Close(ctx)
+			return nil, fmt.Errorf("PostgreSQL readiness: %w", err)
+		}
 	}
 
 	backend := &backendCapture{

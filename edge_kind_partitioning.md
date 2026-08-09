@@ -80,10 +80,12 @@ until the accepted smoke passes. Once a version 2 application write is allowed,
 recovery is forward-fix or restore/reconcile; the retained version 1 tables are
 not a live downgrade path.
 
-Operational acceptance is identity-bound as well as state-bound: every new or
-reused application session must match the layout's current cluster/database
-binding and identity epoch, and have `session_user = current_user` matching the
-recorded non-owner target role OID/name. That role must differ from the schema
+Operational acceptance is identity-bound as well as state-bound: service-start
+assertion validates the complete contract, and the first use of each physical
+application session must match the asserted cluster/database binding and have
+`session_user = current_user` matching the recorded non-owner target role
+OID/name. Reused sessions inherit that startup assertion and backend check;
+managed identity or epoch changes require drain and reassertion. The role must differ from the schema
 owner and operator/control session user; migration scope additionally requires
 it to differ from the preflighted rollback-preparation role and every V1 writer
 login. Fresh bootstrap has no preparation or V1-writer identity to compare. A

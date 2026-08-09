@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -44,6 +45,12 @@ type SchemaManager struct {
 	lock                  *sync.RWMutex
 	graphQueryMemoryLimit size.Size
 	observations          observationState
+	startupLock           sync.Mutex
+	startupReady          atomic.Bool
+	closed                atomic.Bool
+	backendLock           sync.Mutex
+	validatedBackends     map[*pgx.Conn]struct{}
+	expectedRuntime       runtimeReadiness
 }
 
 func NewSchemaManager(pool *pgxpool.Pool, graphQueryMemoryLimit size.Size) *SchemaManager {
@@ -55,46 +62,70 @@ func NewSchemaManager(pool *pgxpool.Pool, graphQueryMemoryLimit size.Size) *Sche
 		kindIDsByKind:         map[int16]graph.Kind{},
 		lock:                  &sync.RWMutex{},
 		graphQueryMemoryLimit: graphQueryMemoryLimit,
+		validatedBackends:     map[*pgx.Conn]struct{}{},
 	}
 }
 
-// acquireGuarded acquires a physical backend and validates the runtime contract
-// on that exact connection before returning it to an application entry point.
-// Every failure releases the connection and no caller delegate is invoked.
-func (s *SchemaManager) acquireGuarded(ctx context.Context, allowUninitialized bool) (*pgxpool.Conn, error) {
-	started := time.Now()
-	conn, err := s.pool.Acquire(ctx)
-	if err != nil {
-		result, code := boundedErrorResult(err)
-		s.observations.emit(Observation{Event: ObservationRuntimeGuard, Result: result, LayoutErrorCode: code, Duration: time.Since(started)})
+func (s *SchemaManager) requireStartupValidation() error {
+	if s.closed.Load() || !s.startupReady.Load() {
+		return &LayoutError{Code: LayoutErrorStartupValidation, State: "unasserted", Err: ErrStartupValidation}
+	}
+	if !activationReady() {
+		return &LayoutError{Code: LayoutErrorActivationNotReady, State: "v2_accepted", Err: ErrActivationNotReady}
+	}
+	return nil
+}
+
+// acquireOperational is the transaction hot-path gate. Startup performs the
+// exhaustive catalog, topology, receipt, database, and role validation once;
+// ordinary operations only consult local state before acquiring a connection.
+func (s *SchemaManager) acquireOperational(ctx context.Context) (*pgxpool.Conn, error) {
+	if err := s.requireStartupValidation(); err != nil {
 		return nil, err
 	}
-
-	facts, err := classifyConnection(ctx, conn)
-	if err == nil {
-		err = requireOperational(facts, allowUninitialized)
-	}
+	conn, err := s.pool.Acquire(ctx)
 	if err != nil {
-		result, code := boundedErrorResult(err)
-		s.observations.emit(Observation{Event: ObservationRuntimeGuard, Result: result, LayoutState: string(facts.State),
-			LayoutErrorCode: code, StatementCount: facts.GuardStatements, Duration: time.Since(started)})
+		return nil, err
+	}
+	if err := s.requireStartupValidation(); err != nil {
 		conn.Release()
 		return nil, err
 	}
-	s.observations.emit(Observation{Event: ObservationRuntimeGuard, Result: "ok", LayoutState: string(facts.State),
-		StatementCount: facts.GuardStatements, Duration: time.Since(started)})
-
+	if err := s.ensureBackend(ctx, conn); err != nil {
+		conn.Release()
+		return nil, err
+	}
 	return conn, nil
 }
 
-func (s *SchemaManager) WriteTransaction(ctx context.Context, txDelegate graph.TransactionDelegate, options ...graph.TransactionOption) error {
-	return s.writeTransaction(ctx, txDelegate, false, options...)
+func (s *SchemaManager) ensureBackend(ctx context.Context, conn *pgxpool.Conn) error {
+	physical := conn.Conn()
+	s.backendLock.Lock()
+	defer s.backendLock.Unlock()
+	if _, ok := s.validatedBackends[physical]; ok {
+		return nil
+	}
+	if err := AfterPooledConnectionEstablished(ctx, physical); err != nil {
+		return err
+	}
+	if err := validateBackendIdentity(ctx, conn, s.expectedRuntime); err != nil {
+		return err
+	}
+	s.validatedBackends[physical] = struct{}{}
+	return nil
 }
 
-func (s *SchemaManager) writeTransaction(ctx context.Context, txDelegate graph.TransactionDelegate, allowUninitialized bool, options ...graph.TransactionOption) error {
+func (s *SchemaManager) clearValidatedBackends() {
+	s.backendLock.Lock()
+	defer s.backendLock.Unlock()
+	s.validatedBackends = map[*pgx.Conn]struct{}{}
+	s.expectedRuntime = runtimeReadiness{}
+}
+
+func (s *SchemaManager) WriteTransaction(ctx context.Context, txDelegate graph.TransactionDelegate, options ...graph.TransactionOption) error {
 	if cfg, err := renderConfig(batchWriteSize, readWriteTxOptions, options); err != nil {
 		return err
-	} else if conn, err := s.acquireGuarded(ctx, allowUninitialized); err != nil {
+	} else if conn, err := s.acquireOperational(ctx); err != nil {
 		return err
 	} else {
 		defer conn.Release()
@@ -298,7 +329,7 @@ func (s *SchemaManager) MapKinds(ctx context.Context, kinds graph.Kinds) ([]int1
 func (s *SchemaManager) ReadTransaction(ctx context.Context, txDelegate graph.TransactionDelegate, options ...graph.TransactionOption) error {
 	if cfg, err := renderConfig(batchWriteSize, readOnlyTxOptions, options); err != nil {
 		return err
-	} else if conn, err := s.acquireGuarded(ctx, false); err != nil {
+	} else if conn, err := s.acquireOperational(ctx); err != nil {
 		return err
 	} else {
 		defer conn.Release()
@@ -650,6 +681,39 @@ func (s *SchemaManager) reconcileAcceptedSchema(tx graph.Transaction, schema gra
 }
 
 func (s *SchemaManager) AssertSchema(ctx context.Context, schema graph.Schema) error {
+	return s.assertStartup(ctx, &schema)
+}
+
+// AssertRuntime validates an already-provisioned target without changing its
+// schema. It is the startup entry point for read-only services and tools.
+func (s *SchemaManager) AssertRuntime(ctx context.Context) error {
+	return s.assertStartup(ctx, nil)
+}
+
+func (s *SchemaManager) assertStartup(ctx context.Context, schema *graph.Schema) (returnErr error) {
+	s.startupLock.Lock()
+	defer s.startupLock.Unlock()
+	if s.closed.Load() {
+		return &LayoutError{Code: LayoutErrorStartupValidation, State: "closed", Err: ErrStartupValidation}
+	}
+
+	started := time.Now()
+	var observedState string
+	var validationStatements int
+	s.startupReady.Store(false)
+	s.invalidateCaches()
+	s.clearValidatedBackends()
+	defer func() {
+		result, code := boundedErrorResult(returnErr)
+		s.observations.emit(Observation{Event: ObservationStartupValidation, Result: result,
+			LayoutState: observedState, LayoutErrorCode: code, StatementCount: validationStatements,
+			Duration: time.Since(started)})
+		if returnErr != nil {
+			s.startupReady.Store(false)
+			s.invalidateCaches()
+		}
+	}()
+
 	cfg, err := renderConfig(batchWriteSize, readWriteTxOptions, []graph.TransactionOption{OptionSetQueryExecMode(pgx.QueryExecModeSimpleProtocol)})
 	if err != nil {
 		return err
@@ -658,29 +722,110 @@ func (s *SchemaManager) AssertSchema(ctx context.Context, schema graph.Schema) e
 	if err != nil {
 		return err
 	}
-	defer conn.Release()
-
 	facts, err := classifyConnection(ctx, conn)
 	if err != nil {
+		conn.Release()
 		return err
 	}
-	if err := requireOperational(facts, true); err != nil {
+	observedState = string(facts.State)
+	validationStatements += facts.GuardStatements
+	if err := requireOperational(facts, schema != nil); err != nil {
+		conn.Release()
 		return err
 	}
 
-	tx, err := newTransactionWrapper(ctx, conn, s, cfg, true)
-	if err != nil {
-		return err
-	}
-	defer tx.Close()
+	if schema != nil {
+		err = func() error {
+			tx, err := newTransactionWrapper(ctx, conn, s, cfg, true)
+			if err != nil {
+				return err
+			}
+			defer tx.Close()
+			// Serialize schema assertion across service instances while retaining
+			// transaction-scoped, automatically released ownership.
+			if _, err = tx.tx.Exec(ctx, "select pg_catalog.pg_advisory_xact_lock($1)", int64(0x44415747535632)); err != nil {
+				return err
+			}
 
-	if facts.State == layout.StateV2Accepted {
-		err = s.reconcileAcceptedSchema(tx, schema)
+			if facts.State == layout.StateV2Accepted {
+				err = s.reconcileAcceptedSchema(tx, *schema)
+			} else {
+				err = s.assertSchema(tx, *schema)
+			}
+			if err == nil && schema.DefaultGraph.Name != "" {
+				defaultGraphSchema := schema.DefaultGraph
+				for _, graphSchema := range schema.Graphs {
+					if graphSchema.Name == schema.DefaultGraph.Name {
+						defaultGraphSchema = graphSchema
+						break
+					}
+				}
+				var graphModel model.Graph
+				graphModel, err = s.AssertGraph(tx, defaultGraphSchema)
+				if err == nil {
+					var kindIDs []int16
+					kindIDs, err = s.assertKindsInTransaction(tx, defaultGraphSchema.Edges)
+					if err == nil {
+						var leaves map[int16]model.EdgeKindPartition
+						leaves, err = s.EnsureEdgeKindPartitions(tx, graphModel.ID, kindIDs)
+						if err == nil {
+							graphModel.Partitions.EdgeKindPartitions = leaves
+							s.stageDefaultGraph(tx, graphModel, defaultGraphSchema)
+						}
+					}
+				}
+			}
+			if err != nil {
+				return err
+			}
+			return tx.Commit()
+		}()
+		conn.Release()
+		if err != nil {
+			return err
+		}
 	} else {
-		err = s.assertSchema(tx, schema)
+		conn.Release()
 	}
+
+	// Schema DDL can replace composite OIDs. Drain all pre-assertion backends,
+	// then prove the committed state and initialize types on a fresh backend.
+	if schema != nil {
+		s.pool.Reset()
+		s.clearValidatedBackends()
+	}
+	conn, err = s.pool.Acquire(ctx)
 	if err != nil {
 		return err
 	}
-	return tx.Commit()
+	defer conn.Release()
+	if err := AfterPooledConnectionEstablished(ctx, conn.Conn()); err != nil {
+		return err
+	}
+	postFacts, err := classifyConnection(ctx, conn)
+	if err != nil {
+		return err
+	}
+	observedState = string(postFacts.State)
+	validationStatements += postFacts.GuardStatements
+	if err := requireOperational(postFacts, false); err != nil {
+		return err
+	}
+	s.backendLock.Lock()
+	s.expectedRuntime = postFacts.Readiness
+	s.validatedBackends[conn.Conn()] = struct{}{}
+	s.backendLock.Unlock()
+
+	readWrapper, err := newTransactionWrapper(ctx, conn, s, &Config{
+		Options: readOnlyTxOptions, QueryExecMode: pgx.QueryExecModeSimpleProtocol,
+		QueryResultFormats: pgx.QueryResultFormats{pgx.BinaryFormatCode}, BatchWriteSize: batchWriteSize,
+	}, false)
+	if err != nil {
+		return err
+	}
+	if err := s.fetch(readWrapper); err != nil {
+		return err
+	}
+	s.startupReady.Store(true)
+	return nil
 }

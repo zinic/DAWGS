@@ -5,6 +5,7 @@ package migrate
 import (
 	"context"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -120,6 +121,20 @@ values(1,1,10,11,1,'{}')`)
 (select pg_catalog.md5(pg_catalog.string_agg(l.xmin::text,',' order by l.kind_id)) from public.dawgs_edge_kind_leaf l join public.graph g on g.id=l.graph_id where g.name='accepted_rehearsal_graph')`).Scan(&graphXminAfter, &leafXminAfter))
 		require.Equal(t, graphXminBefore, graphXminAfter)
 		require.Equal(t, leafXminBefore, leafXminAfter)
+		assertionErrors := make(chan error, 4)
+		var assertions sync.WaitGroup
+		for range 4 {
+			assertions.Add(1)
+			go func() {
+				defer assertions.Done()
+				assertionErrors <- targetDriver.AssertSchema(ctx, rehearsalSchema)
+			}()
+		}
+		assertions.Wait()
+		close(assertionErrors)
+		for assertionErr := range assertionErrors {
+			require.NoError(t, assertionErr)
+		}
 		provisioningBeforeRead := observations.leafProvisioningCount
 		require.NoError(t, targetDriver.ReadTransaction(ctx, func(tx graph.Transaction) error {
 			result := tx.WithGraph(rehearsalSchema.Graphs[0]).Query(`match ()-[r:REHEARSAL_EDGE_A]->() return count(r)`, nil)
@@ -152,35 +167,48 @@ values(1,1,10,11,1,'{}')`)
 		require.NoError(t, err)
 		require.ElementsMatch(t, inventory, structured.Leaves.Planned)
 		require.NoError(t, targetDriver.ReadTransaction(ctx, func(graph.Transaction) error { return nil }))
-		require.Equal(t, 1, observations.lastRuntimeGuard.StatementCount)
-		require.Equal(t, "ok", observations.lastRuntimeGuard.Result)
+		require.Equal(t, "ok", observations.lastStartupValidation.Result)
+		require.Positive(t, observations.lastStartupValidation.StatementCount)
+		require.Zero(t, observations.runtimeGuardCount)
 
 		admin, err := pgx.Connect(ctx, os.Getenv("PG_TEST_ADMIN_CONNECTION_STRING"))
 		require.NoError(t, err)
 		_, err = admin.Exec(ctx, `alter table public.edge disable trigger dawgs_10_claim_edge`)
 		require.NoError(t, err)
 		require.NoError(t, admin.Close(ctx))
+		// Warm transactions intentionally do not rescan topology. Explicit
+		// readiness and the next service-start assertion detect managed drift.
 		delegateCalled := false
-		err = targetDriver.ReadTransaction(ctx, func(graph.Transaction) error {
+		require.NoError(t, targetDriver.ReadTransaction(ctx, func(graph.Transaction) error {
 			delegateCalled = true
 			return nil
-		})
+		}))
+		require.True(t, delegateCalled)
+		_, err = targetDriver.Readiness(ctx)
 		require.ErrorIs(t, err, pgdriver.ErrLayoutDrift)
-		require.False(t, delegateCalled)
+		require.ErrorIs(t, targetDriver.AssertRuntime(ctx), pgdriver.ErrLayoutDrift)
 	} else {
 		require.ErrorIs(t, readinessErr, pgdriver.ErrActivationNotReady)
-		require.ErrorIs(t, targetDriver.ReadTransaction(ctx, func(graph.Transaction) error { return nil }), pgdriver.ErrActivationNotReady)
+		require.ErrorIs(t, targetDriver.AssertRuntime(ctx), pgdriver.ErrActivationNotReady)
+		require.ErrorIs(t, targetDriver.ReadTransaction(ctx, func(graph.Transaction) error { return nil }), pgdriver.ErrStartupValidation)
 	}
 }
 
 type bootstrapObservationSink struct {
-	lastRuntimeGuard      pgdriver.Observation
+	lock                  sync.Mutex
+	lastStartupValidation pgdriver.Observation
 	leafProvisioningCount int
+	runtimeGuardCount     int
 }
 
 func (s *bootstrapObservationSink) Observe(observation pgdriver.Observation) {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	if observation.Event == pgdriver.ObservationStartupValidation {
+		s.lastStartupValidation = observation
+	}
 	if observation.Event == pgdriver.ObservationRuntimeGuard {
-		s.lastRuntimeGuard = observation
+		s.runtimeGuardCount++
 	}
 	if observation.Event == pgdriver.ObservationLeafProvisioning {
 		s.leafProvisioningCount++

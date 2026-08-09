@@ -73,6 +73,15 @@ func newPostgresSQLRunner(ctx context.Context, datasetDir, connection, maintenan
 		_ = db.Close(ctx)
 		return nil, fmt.Errorf("expected *pg.Driver, got %T", db)
 	}
+	nodeKinds, edgeKinds, err := scanDatasetKinds(datasetDir, scaleCorpusDatasets(corpus))
+	if err != nil {
+		_ = db.Close(ctx)
+		return nil, err
+	}
+	if err := db.AssertSchema(ctx, benchmarkSchema(nodeKinds, edgeKinds)); err != nil {
+		_ = db.Close(ctx)
+		return nil, fmt.Errorf("assert PostgreSQL schema: %w", err)
+	}
 	health, err := pgDriver.Readiness(ctx)
 	if err != nil {
 		_ = db.Close(ctx)
@@ -102,17 +111,6 @@ where r.rolname=session_user and d.datname=pg_catalog.current_database()`, healt
 	if err := maintenance.Close(ctx); err != nil {
 		_ = db.Close(ctx)
 		return nil, fmt.Errorf("close PostgreSQL maintenance validation connection: %w", err)
-	}
-
-	nodeKinds, edgeKinds, err := scanDatasetKinds(datasetDir, scaleCorpusDatasets(corpus))
-	if err != nil {
-		_ = db.Close(ctx)
-		return nil, err
-	}
-
-	if err := db.AssertSchema(ctx, benchmarkSchema(nodeKinds, edgeKinds)); err != nil {
-		_ = db.Close(ctx)
-		return nil, fmt.Errorf("assert PostgreSQL schema: %w", err)
 	}
 
 	defaultGraph, ok := pgDriver.DefaultGraph()

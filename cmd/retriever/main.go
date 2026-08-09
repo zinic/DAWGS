@@ -161,6 +161,9 @@ func (s commandRuntime) runDump(ctx context.Context, args []string) error {
 		return err
 	}
 	defer db.Close(ctx)
+	if err := assertPostgresRuntime(ctx, db, driverName); err != nil {
+		return err
+	}
 
 	targets, err := resolveGraphTargets(ctx, db, driverName, []string(graphs), *allGraphs)
 	if err != nil {
@@ -362,6 +365,9 @@ func (s commandRuntime) runVerify(ctx context.Context, args []string) error {
 		return err
 	}
 	defer db.Close(ctx)
+	if err := assertPostgresRuntime(ctx, db, driverName); err != nil {
+		return err
+	}
 
 	result, err := retriever.Verify(ctx, db, driverName, cfg)
 	if err != nil {
@@ -427,6 +433,9 @@ func (s commandRuntime) runBench(ctx context.Context, args []string) error {
 		return err
 	}
 	defer db.Close(ctx)
+	if err := assertPostgresRuntime(ctx, db, driverName); err != nil {
+		return err
+	}
 
 	targets, err := resolveGraphTargets(ctx, db, driverName, []string(graphs), *allGraphs)
 	if err != nil {

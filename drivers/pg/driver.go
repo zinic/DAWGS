@@ -85,7 +85,7 @@ func (s *Driver) BatchOperation(ctx context.Context, batchDelegate graph.BatchDe
 
 	if cfg, err := renderConfig(batchConfig.BatchSize, readWriteTxOptions, nil); err != nil {
 		return err
-	} else if conn, err := s.SchemaManager.acquireGuarded(ctx, false); err != nil {
+	} else if conn, err := s.SchemaManager.acquireOperational(ctx); err != nil {
 		return err
 	} else {
 		defer conn.Release()
@@ -183,6 +183,10 @@ func (s *Driver) Readiness(ctx context.Context) (LayoutHealth, error) {
 }
 
 func (s *Driver) Close(ctx context.Context) error {
+	s.SchemaManager.startupLock.Lock()
+	defer s.SchemaManager.startupLock.Unlock()
+	s.SchemaManager.closed.Store(true)
+	s.SchemaManager.startupReady.Store(false)
 	s.pool.Close()
 	return nil
 }
@@ -220,29 +224,11 @@ func (s *Driver) FetchSchema(ctx context.Context) (graph.Schema, error) {
 }
 
 func (s *Driver) AssertSchema(ctx context.Context, schema graph.Schema) error {
-	// Resetting the pool must be done on every schema assertion as composite types may have changed OIDs
-	defer s.pool.Reset()
+	return s.SchemaManager.AssertSchema(ctx, schema)
+}
 
-	// Assert that the base graph schema exists and has a matching schema definition
-	if err := s.SchemaManager.AssertSchema(ctx, schema); err != nil {
-		return err
-	}
-
-	if schema.DefaultGraph.Name != "" {
-		defaultGraphSchema := schema.DefaultGraph
-		for _, graphSchema := range schema.Graphs {
-			if graphSchema.Name == schema.DefaultGraph.Name {
-				defaultGraphSchema = graphSchema
-				break
-			}
-		}
-		// There's a default graph defined. Assert that it exists and has a matching schema
-		if err := s.SchemaManager.AssertDefaultGraph(ctx, defaultGraphSchema); err != nil {
-			return err
-		}
-	}
-
-	return nil
+func (s *Driver) AssertRuntime(ctx context.Context) error {
+	return s.SchemaManager.AssertRuntime(ctx)
 }
 
 func (s *Driver) Run(ctx context.Context, query string, parameters map[string]any) error {
@@ -274,7 +260,7 @@ func (s *Driver) RefreshKinds(ctx context.Context) error {
 }
 
 func (s *Driver) OptimizeStorage(ctx context.Context) error {
-	conn, err := s.SchemaManager.acquireGuarded(ctx, false)
+	conn, err := s.SchemaManager.acquireOperational(ctx)
 	if err != nil {
 		return fmt.Errorf("acquire connection for VACUUM: %w", err)
 	}
@@ -414,7 +400,7 @@ func (s *Driver) DeleteRelationshipsByKinds(ctx context.Context, kinds graph.Kin
 // names the delete for the acquire error message; statement and arguments are passed through unchanged so each caller
 // preserves its own SQL, positional arguments, and statement error wrapping.
 func (s *Driver) execDelete(ctx context.Context, label, statement string, arguments ...any) error {
-	conn, err := s.SchemaManager.acquireGuarded(ctx, false)
+	conn, err := s.SchemaManager.acquireOperational(ctx)
 	if err != nil {
 		return fmt.Errorf("acquire connection for %s delete: %w", label, err)
 	}

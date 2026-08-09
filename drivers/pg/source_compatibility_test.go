@@ -20,6 +20,7 @@ var (
 	_ graph.Database                            = (*pg.Driver)(nil)
 	_ pg.LayoutHealthProvider                   = (*pg.Driver)(nil)
 	_ pg.ReadinessProvider                      = (*pg.Driver)(nil)
+	_ pg.RuntimeAssertionProvider               = (*pg.Driver)(nil)
 )
 
 func TestPostgresPublicCompatibilityContract(t *testing.T) {
@@ -27,7 +28,7 @@ func TestPostgresPublicCompatibilityContract(t *testing.T) {
 	for _, typed := range []error{
 		pg.ErrMigrationRequired, pg.ErrMigrationInProgress, pg.ErrSchemaUninitialized,
 		pg.ErrLayoutDrift, pg.ErrPendingAcceptance, pg.ErrSmokePending, pg.ErrWrongRuntimeRole,
-		pg.ErrRestoreRebind, pg.ErrActivationNotReady,
+		pg.ErrRestoreRebind, pg.ErrActivationNotReady, pg.ErrStartupValidation,
 	} {
 		require.NotNil(t, typed)
 	}

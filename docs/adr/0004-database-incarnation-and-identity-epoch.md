@@ -1,5 +1,7 @@
 # ADR 0004: Database incarnation and identity epoch
 
+> Runtime enforcement at the service boundary is superseded by ADR 0014.
+
 Status: accepted for implementation.
 
 Live actions bind PostgreSQL system identifier, database OID and name, plus an

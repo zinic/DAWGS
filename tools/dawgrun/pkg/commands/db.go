@@ -200,8 +200,8 @@ func openDAWGSDatabase(ctx context.Context, connStr string, options openConnecti
 		if !ok {
 			return nil, "", fmt.Errorf("expected *pg.Driver, got %T", querier)
 		}
-		if _, err := pgQuerier.Readiness(ctx); err != nil {
-			return nil, "", fmt.Errorf("PostgreSQL readiness: %w", err)
+		if err := pgQuerier.AssertRuntime(ctx); err != nil {
+			return nil, "", fmt.Errorf("PostgreSQL startup validation: %w", err)
 		}
 	}
 

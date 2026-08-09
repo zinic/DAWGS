@@ -1,5 +1,11 @@
 # V2 performance work 1 benchmark runbook
 
+> ADR 0014 replaces the per-operation guard described in historical checkpoints
+> below. Run `AssertSchema` (mutating services) or `AssertRuntime` (read-only
+> services) before traffic, use `Readiness` for fresh audits, and drain/restart/
+> reassert every service after managed DDL, ACL, trigger, migration, restore, or
+> role changes.
+
 ## Purpose and current disposition
 
 This is the operator companion to [`v2_perf_work_1.md`](v2_perf_work_1.md).

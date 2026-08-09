@@ -47,6 +47,10 @@ func main() {
 	defer pool.Close()
 
 	db := pg.NewDriver(size.Gibibyte, pool)
+	if err := db.AssertRuntime(context.Background()); err != nil {
+		fmt.Fprintf(os.Stderr, "PostgreSQL startup validation failed: %v\n", err)
+		os.Exit(1)
+	}
 	health, err := db.Readiness(context.Background())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "PostgreSQL readiness failed: %v\n", err)

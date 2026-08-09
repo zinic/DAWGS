@@ -558,10 +558,15 @@ func assertManifestSchemas(ctx context.Context, db graph.Database, value Manifes
 		return err
 	}
 
+	combined := graph.Schema{}
 	for _, assertion := range assertions {
-		if err := db.AssertSchema(ctx, assertion.Schema); err != nil {
-			return fmt.Errorf("assert schema for graph %q: %w", assertion.GraphName, err)
+		combined.Graphs = append(combined.Graphs, assertion.Schema.Graphs...)
+		if combined.DefaultGraph.Name == "" {
+			combined.DefaultGraph = assertion.Schema.DefaultGraph
 		}
+	}
+	if err := db.AssertSchema(ctx, combined); err != nil {
+		return fmt.Errorf("assert manifest schemas: %w", err)
 	}
 
 	return nil

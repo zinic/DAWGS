@@ -99,6 +99,14 @@ make build_pg_migrate
 bin/dawgs-pg-migrate preflight --connection-file operator.json --manifest manifest.json --report preflight.json
 ```
 
+Each PostgreSQL driver instance is closed until startup validation succeeds.
+Services that own schema reconciliation call `AssertSchema` once before serving;
+read-only services call `(*pg.Driver).AssertRuntime`. `Readiness` is a fresh
+diagnostic and does not open the driver. Ordinary transactions then use a local
+readiness gate, with a narrow identity check only once per physical backend.
+DDL, ACL, trigger, restore, migration, or role changes require draining and
+restarting/reasserting all service instances; see ADR 0014.
+
 Preflight and every migration confirmation also require the direct target,
 complete writer-probe set, dormant preparation role, capacity evidence, and a
 recent restore-tested backup evidence file. `migrate` installs only the durable

@@ -1,12 +1,52 @@
 package pg
 
 import (
+	"context"
 	"errors"
 	"testing"
 
 	"github.com/specterops/dawgs/drivers/pg/internal/layout"
+	"github.com/specterops/dawgs/graph"
+	"github.com/specterops/dawgs/util/size"
 	"github.com/stretchr/testify/require"
 )
+
+func TestOperationsRefuseLocallyBeforeStartupAssertion(t *testing.T) {
+	driver := NewDriver(size.Gibibyte, nil)
+	ctx := context.Background()
+	delegateCalled := false
+
+	operations := []func() error{
+		func() error {
+			return driver.ReadTransaction(ctx, func(graph.Transaction) error { delegateCalled = true; return nil })
+		},
+		func() error {
+			return driver.WriteTransaction(ctx, func(graph.Transaction) error { delegateCalled = true; return nil })
+		},
+		func() error {
+			return driver.BatchOperation(ctx, func(graph.Batch) error { delegateCalled = true; return nil })
+		},
+		func() error { return driver.Run(ctx, "select 1", nil) },
+		func() error { return driver.WipeGraph(ctx, nil) },
+		func() error { return driver.OptimizeStorage(ctx) },
+		func() error { return driver.DeleteNodesByKinds(ctx, nil, nil) },
+	}
+	for _, operation := range operations {
+		require.ErrorIs(t, operation(), ErrStartupValidation)
+	}
+	require.False(t, delegateCalled)
+}
+
+func TestSessionIdentityStatementsAreRejected(t *testing.T) {
+	for _, statement := range []string{
+		"SET ROLE operator", " reset role", "SET SESSION AUTHORIZATION operator",
+		"RESET SESSION AUTHORIZATION", "select set_config('role', 'operator', false)",
+		"/* caller */ SET ROLE operator", "DISCARD ALL",
+	} {
+		require.True(t, isSessionIdentityStatement(statement), statement)
+	}
+	require.False(t, isSessionIdentityStatement("select 'set role operator'"))
+}
 
 func TestRequireOperationalRefusesEveryTransitionState(t *testing.T) {
 	tests := []struct {

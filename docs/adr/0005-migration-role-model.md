@@ -1,5 +1,7 @@
 # ADR 0005: Migration role model
 
+> Runtime enforcement at the service boundary is superseded by ADR 0014.
+
 Status: accepted for implementation; PG16/18 privilege evidence required.
 
 Owner, operator, target, old writer, and rollback-preparation are distinct role

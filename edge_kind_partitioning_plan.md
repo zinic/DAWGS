@@ -1,5 +1,8 @@
 # PostgreSQL Edge Kind Partitioning Implementation Plan
 
+> ADR 0014 supersedes this plan's per-operation runtime-guard requirements with
+> exhaustive once-per-service-start assertion and once-per-backend identity checks.
+
 ## Status and authority
 
 This is the execution plan for the architecture and retirement contract in

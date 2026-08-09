@@ -19,6 +19,7 @@ var (
 	ErrWrongRuntimeRole    = errors.New("PostgreSQL session is not the recorded runtime target")
 	ErrRestoreRebind       = errors.New("PostgreSQL database identity changed; restore rebind required")
 	ErrActivationNotReady  = errors.New("PostgreSQL V2 activation gate is not ready")
+	ErrStartupValidation   = errors.New("PostgreSQL startup validation has not completed")
 )
 
 type LayoutErrorCode string
@@ -33,6 +34,7 @@ const (
 	LayoutErrorWrongRuntimeRole    LayoutErrorCode = "wrong_runtime_role"
 	LayoutErrorRestoreRebind       LayoutErrorCode = "restore_rebind_required"
 	LayoutErrorActivationNotReady  LayoutErrorCode = "activation_not_ready"
+	LayoutErrorStartupValidation   LayoutErrorCode = "startup_validation_required"
 )
 
 type LayoutError struct {
@@ -74,6 +76,12 @@ type LayoutHealthProvider interface {
 
 type ReadinessProvider interface {
 	Readiness(context.Context) (LayoutHealth, error)
+}
+
+// RuntimeAssertionProvider performs the once-per-service-start assertion for
+// read-only consumers that must not reconcile schema.
+type RuntimeAssertionProvider interface {
+	AssertRuntime(context.Context) error
 }
 
 type runtimeReadiness struct {
@@ -165,6 +173,25 @@ func readinessFromIdentity(identity layout.RuntimeIdentity) runtimeReadiness {
 		CurrentDatabaseOwnerOID:  identity.CurrentDatabaseOwnerOID,
 		CurrentRoleHasMembership: identity.CurrentRoleHasMembership,
 	}
+}
+
+// validateBackendIdentity checks only connection/session identity. The
+// exhaustive schema and topology contract is asserted separately at startup.
+func validateBackendIdentity(ctx context.Context, conn *pgxpool.Conn, expected runtimeReadiness) error {
+	actual := expected
+	actual.Checked = true
+	if err := conn.QueryRow(ctx, `/* dawgs:backend/identity */ select
+d.oid,d.datname,(pg_catalog.pg_control_system()).system_identifier::text,
+r.oid,r.rolname,session_user::text,current_user::text,r.rolsuper,d.datdba,
+exists(select 1 from pg_catalog.pg_auth_members m where m.member=r.oid)
+from pg_catalog.pg_database d join pg_catalog.pg_roles r on r.rolname=session_user
+where d.datname=pg_catalog.current_database()`).Scan(
+		&actual.CurrentDatabaseOID, &actual.CurrentDatabaseName, &actual.CurrentSystemIdentifier,
+		&actual.CurrentRoleOID, &actual.CurrentRoleName, &actual.SessionUser, &actual.CurrentUser,
+		&actual.CurrentRoleSuperuser, &actual.CurrentDatabaseOwnerOID, &actual.CurrentRoleHasMembership); err != nil {
+		return err
+	}
+	return requireOperational(operationalFacts{Facts: layout.Facts{State: layout.StateV2Accepted}, Readiness: actual}, false)
 }
 
 func requireOperational(facts operationalFacts, allowUninitialized bool) error {

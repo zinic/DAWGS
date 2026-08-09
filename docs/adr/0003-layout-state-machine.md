@@ -1,5 +1,7 @@
 # ADR 0003: Layout state machine and authoritative pointers
 
+> Runtime enforcement at the service boundary is superseded by ADR 0014.
+
 Status: accepted for implementation; transition table tests required.
 
 One singleton layout row and append-only receipts are authoritative. Legal

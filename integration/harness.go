@@ -167,6 +167,10 @@ func Open(t *testing.T, opts Options) *Session {
 		if err := db.AssertSchema(ctx, *schema); err != nil {
 			t.Fatalf("failed to assert schema: %v", err)
 		}
+	} else if pgDriver, ok := db.(*pg.Driver); ok {
+		if err := pgDriver.AssertRuntime(ctx); err != nil {
+			t.Fatalf("failed to assert PostgreSQL runtime: %v", err)
+		}
 	}
 
 	t.Cleanup(func() {

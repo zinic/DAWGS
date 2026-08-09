@@ -1,5 +1,7 @@
 # ADR 0009: Canonical namespace and privilege policy
 
+> Runtime enforcement at the service boundary is superseded by ADR 0014.
+
 Status: accepted for implementation; hostile-search-path evidence required.
 
 Managed objects live in `public`; executable references are schema-qualified

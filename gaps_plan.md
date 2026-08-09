@@ -1,5 +1,8 @@
 # Edge Kind Partitioning Gap Closure Plan
 
+> ADR 0014 supersedes per-operation and next-operation guard requirements in
+> this plan. Managed layout changes now require drain, restart, and reassertion.
+
 ## Status and authority
 
 This document sequences the remediation required after review of the current

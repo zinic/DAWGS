@@ -1,5 +1,7 @@
 # ADR 0013: Rollback, restore, cleanup, fleet, and late-upgrade policy
 
+> Runtime enforcement at the service boundary is superseded by ADR 0014.
+
 Status: accepted for implementation; operational evidence pending.
 
 In-place rollback ends atomically at acceptance. Before then it reverses

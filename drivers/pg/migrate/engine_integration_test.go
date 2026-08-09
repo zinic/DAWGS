@@ -431,13 +431,14 @@ group by c.applicable,c.map_digest`, report.MigrationID).Scan(
 	require.True(t, graphPresent)
 
 	operatorDriver := pgdriver.NewDriver(0, pool)
-	err = operatorDriver.ReadTransaction(ctx, func(graph.Transaction) error { return nil })
+	err = operatorDriver.AssertRuntime(ctx)
 	require.ErrorIs(t, err, pgdriver.ErrWrongRuntimeRole)
 	targetPool, err := pgxpool.New(ctx, targetConnectionString)
 	require.NoError(t, err)
 	defer targetPool.Close()
 	targetDriver := pgdriver.NewDriver(0, targetPool)
-	require.ErrorIs(t, targetDriver.ReadTransaction(ctx, func(graph.Transaction) error { return nil }), pgdriver.ErrActivationNotReady)
+	require.ErrorIs(t, targetDriver.AssertRuntime(ctx), pgdriver.ErrActivationNotReady)
+	require.ErrorIs(t, targetDriver.ReadTransaction(ctx, func(graph.Transaction) error { return nil }), pgdriver.ErrStartupValidation)
 
 	var unregisteredKindID int16
 	require.NoError(t, adminTestConnection.QueryRow(ctx, `insert into public.kind(name) values('UNREGISTERED_KIND') returning id`).Scan(&unregisteredKindID))
@@ -448,7 +449,7 @@ group by c.applicable,c.map_digest`, report.MigrationID).Scan(
 	status, err = engine.Status(ctx)
 	require.NoError(t, err)
 	require.Equal(t, "drifted", status.State)
-	require.ErrorIs(t, targetDriver.ReadTransaction(ctx, func(graph.Transaction) error { return nil }), pgdriver.ErrLayoutDrift)
+	require.ErrorIs(t, targetDriver.AssertRuntime(ctx), pgdriver.ErrLayoutDrift)
 	_, err = adminTestConnection.Exec(ctx, fmt.Sprintf(`alter table public.edge_1 detach partition %s`, pgx.Identifier{"public", leafName}.Sanitize()))
 	require.NoError(t, err)
 	_, err = adminTestConnection.Exec(ctx, fmt.Sprintf(`drop table %s`, pgx.Identifier{"public", leafName}.Sanitize()))
@@ -466,7 +467,8 @@ group by c.applicable,c.map_digest`, report.MigrationID).Scan(
 	require.Equal(t, "drifted", status.State)
 	_, err = pool.Exec(ctx, `update public.dawgs_schema_layout set current_smoke_receipt_digest=$1 where singleton`, smoke.ReceiptDigest)
 	require.NoError(t, err)
-	require.ErrorIs(t, targetDriver.ReadTransaction(ctx, func(graph.Transaction) error { return nil }), pgdriver.ErrActivationNotReady)
+	require.ErrorIs(t, targetDriver.AssertRuntime(ctx), pgdriver.ErrActivationNotReady)
+	require.ErrorIs(t, targetDriver.ReadTransaction(ctx, func(graph.Transaction) error { return nil }), pgdriver.ErrStartupValidation)
 
 	cleanupNow := time.Now().UTC()
 	acceptedAt := cleanupNow.Add(-4 * time.Hour)

@@ -1,5 +1,11 @@
 # V2 performance work 1: close the live V1/V2 benchmark gaps
 
+> **Implemented design update:** ADR 0014 supersedes WP2's per-operation guard.
+> Exhaustive validation now runs once per service start through `AssertSchema`
+> or `AssertRuntime`; warm operations use a local gate and each new physical
+> backend receives one narrow identity/type check. “Very next operation” drift
+> detection is replaced by drain/restart/reassert plus explicit `Readiness`.
+
 ## Status and authority
 
 This document is the implementation plan for the performance gaps measured in
@@ -196,10 +202,9 @@ exists. Index changes are a later, separately attributable work package.
 
 Every work package must preserve these rules:
 
-- The first application statement on an acquired physical connection cannot
-  execute unless that same connection satisfies the current layout, database
-  incarnation, target identity, direct-role, smoke, cleanup, and activation
-  contract.
+- The first application statement in a service instance cannot execute until
+  exhaustive startup assertion succeeds. Each physical connection is checked
+  once for database incarnation, direct target identity, and composite types.
 - New or replaced physical backends, restore/rebind, pool reset, role change,
   identity-epoch change, topology drift, and uncertain commit cannot inherit a
   stale success.

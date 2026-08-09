@@ -9,9 +9,10 @@ import (
 )
 
 const (
-	ObservationReadiness        = "layout_readiness"
-	ObservationLeafProvisioning = "leaf_provisioning"
-	ObservationRuntimeGuard     = "runtime_guard"
+	ObservationReadiness         = "layout_readiness"
+	ObservationLeafProvisioning  = "leaf_provisioning"
+	ObservationRuntimeGuard      = "runtime_guard"
+	ObservationStartupValidation = "startup_validation"
 )
 
 // Observation is deliberately bounded-cardinality. It contains no database,
