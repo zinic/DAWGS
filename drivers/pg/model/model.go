@@ -57,8 +57,16 @@ func NewGraphPartitionFromSchema(name string, indexes []graph.Index, constraints
 }
 
 type GraphPartitions struct {
-	Node GraphPartition
-	Edge GraphPartition
+	Node               GraphPartition
+	Edge               GraphPartition
+	EdgeKindPartitions map[int16]EdgeKindPartition
+}
+
+// EdgeKindPartition describes a physical V2 kind leaf beneath the stable
+// graph-scoped edge parent.
+type EdgeKindPartition struct {
+	KindID int16
+	Name   string
 }
 
 type Graph struct {

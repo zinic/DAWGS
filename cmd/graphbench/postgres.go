@@ -22,7 +22,10 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/specterops/dawgs"
 	"github.com/specterops/dawgs/cypher/frontend"
@@ -34,13 +37,19 @@ import (
 )
 
 type postgresSQLRunner struct {
-	datasetDir string
-	db         graph.Database
-	pgDriver   *pg.Driver
-	graphID    int32
+	datasetDir            string
+	db                    graph.Database
+	pgDriver              *pg.Driver
+	graphID               int32
+	health                pg.LayoutHealth
+	maintenanceConnection string
+	storage               PostgresStorage
 }
 
-func newPostgresSQLRunner(ctx context.Context, datasetDir, connection string, corpus ScaleCorpus) (*postgresSQLRunner, error) {
+func newPostgresSQLRunner(ctx context.Context, datasetDir, connection, maintenanceConnection string, corpus ScaleCorpus) (*postgresSQLRunner, error) {
+	if maintenanceConnection == "" {
+		return nil, fmt.Errorf("PostgreSQL GraphBench requires a separate direct maintenance connection")
+	}
 	poolCfg, err := pgxpool.ParseConfig(connection)
 	if err != nil {
 		return nil, fmt.Errorf("parse PostgreSQL pool configuration: %w", err)
@@ -59,6 +68,41 @@ func newPostgresSQLRunner(ctx context.Context, datasetDir, connection string, co
 		pool.Close()
 		return nil, fmt.Errorf("open PostgreSQL database: %w", err)
 	}
+	pgDriver, ok := db.(*pg.Driver)
+	if !ok {
+		_ = db.Close(ctx)
+		return nil, fmt.Errorf("expected *pg.Driver, got %T", db)
+	}
+	health, err := pgDriver.Readiness(ctx)
+	if err != nil {
+		_ = db.Close(ctx)
+		return nil, fmt.Errorf("PostgreSQL readiness: %w", err)
+	}
+	maintenance, err := pgx.Connect(ctx, maintenanceConnection)
+	if err != nil {
+		_ = db.Close(ctx)
+		return nil, fmt.Errorf("open PostgreSQL maintenance connection: %w", err)
+	}
+	var direct, authorized, sameDatabase bool
+	if err := maintenance.QueryRow(ctx, `select session_user=current_user,
+(r.rolsuper or r.oid=d.datdba or not exists(
+  select 1 from public.dawgs_edge_kind_leaf l
+  where l.lifecycle_state='active' and not pg_catalog.has_table_privilege(
+    r.rolname,pg_catalog.format('public.edge_%s_%s',l.graph_id,l.kind_id),'MAINTAIN'))),
+d.oid=$1 from pg_catalog.pg_roles r cross join pg_catalog.pg_database d
+where r.rolname=session_user and d.datname=pg_catalog.current_database()`, health.DatabaseOID).Scan(
+		&direct, &authorized, &sameDatabase); err != nil || !direct || !authorized || !sameDatabase {
+		maintenance.Close(ctx)
+		_ = db.Close(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("validate PostgreSQL maintenance connection: %w", err)
+		}
+		return nil, fmt.Errorf("PostgreSQL maintenance connection must be direct, same-database, and authorized for every leaf")
+	}
+	if err := maintenance.Close(ctx); err != nil {
+		_ = db.Close(ctx)
+		return nil, fmt.Errorf("close PostgreSQL maintenance validation connection: %w", err)
+	}
 
 	nodeKinds, edgeKinds, err := scanDatasetKinds(datasetDir, scaleCorpusDatasets(corpus))
 	if err != nil {
@@ -71,12 +115,6 @@ func newPostgresSQLRunner(ctx context.Context, datasetDir, connection string, co
 		return nil, fmt.Errorf("assert PostgreSQL schema: %w", err)
 	}
 
-	pgDriver, ok := db.(*pg.Driver)
-	if !ok {
-		_ = db.Close(ctx)
-		return nil, fmt.Errorf("expected *pg.Driver, got %T", db)
-	}
-
 	defaultGraph, ok := pgDriver.DefaultGraph()
 	if !ok {
 		_ = db.Close(ctx)
@@ -84,10 +122,12 @@ func newPostgresSQLRunner(ctx context.Context, datasetDir, connection string, co
 	}
 
 	return &postgresSQLRunner{
-		datasetDir: datasetDir,
-		db:         db,
-		pgDriver:   pgDriver,
-		graphID:    defaultGraph.ID,
+		datasetDir:            datasetDir,
+		db:                    db,
+		pgDriver:              pgDriver,
+		graphID:               defaultGraph.ID,
+		health:                health,
+		maintenanceConnection: maintenanceConnection,
 	}, nil
 }
 
@@ -95,8 +135,15 @@ func (s *postgresSQLRunner) Close(ctx context.Context) error {
 	if s.db == nil {
 		return nil
 	}
-
 	return s.db.Close(ctx)
+}
+
+func (s *postgresSQLRunner) openMaintenance(ctx context.Context) (*pgx.Conn, error) {
+	maintenance, err := pgx.Connect(ctx, s.maintenanceConnection)
+	if err != nil {
+		return nil, fmt.Errorf("open PostgreSQL maintenance connection: %w", err)
+	}
+	return maintenance, nil
 }
 
 func (s *postgresSQLRunner) Run(ctx context.Context, iterations int, corpus ScaleCorpus) ([]CaseResult, error) {
@@ -109,10 +156,16 @@ func (s *postgresSQLRunner) Run(ctx context.Context, iterations int, corpus Scal
 		if err := clearGraph(ctx, s.db); err != nil {
 			return nil, fmt.Errorf("clear graph for %s: %w", datasetName, err)
 		}
+		if err := s.verifyReset(ctx); err != nil {
+			return nil, fmt.Errorf("verify graph reset for %s: %w", datasetName, err)
+		}
 
 		idMap, err := loadDataset(ctx, s.db, s.datasetDir, datasetName)
 		if err != nil {
 			return nil, err
+		}
+		if err := s.vacuumAnalyzeAndMeasure(ctx); err != nil {
+			return nil, fmt.Errorf("prepare PostgreSQL leaves for %s: %w", datasetName, err)
 		}
 
 		for _, testCase := range casesByDataset[datasetName] {
@@ -136,8 +189,37 @@ func (s *postgresSQLRunner) runCase(ctx context.Context, iterations int, testCas
 		record.Error = err.Error()
 		return record
 	}
+	phases := &ClientPhaseMetrics{}
+	phaseStarted := time.Now()
+	regularQuery, err := frontend.ParseCypher(frontend.NewContext(), testCase.Cypher)
+	phases.ParseNS = time.Since(phaseStarted).Nanoseconds()
+	if err == nil {
+		err = frontend.RequireReadOnly(regularQuery)
+	}
+	var translation translate.Result
+	if err == nil {
+		phaseStarted = time.Now()
+		translation, err = translate.Translate(ctx, regularQuery, s.pgDriver.KindMapper(), params, s.graphID)
+		phases.TranslateNS = time.Since(phaseStarted).Nanoseconds()
+	}
+	if err == nil && translation.HasMutations {
+		err = frontend.ErrMutationNotAllowed
+	}
+	if err != nil {
+		record.Status = StatusError
+		record.Error = err.Error()
+		return record
+	}
+	phaseStarted = time.Now()
+	if _, err := translate.Translated(translation); err != nil {
+		record.Status = StatusError
+		record.Error = err.Error()
+		return record
+	}
+	phases.RenderNS = time.Since(phaseStarted).Nanoseconds()
+	record.ClientPhases = phases
 
-	rowCount, stats, err := measureCypher(ctx, s.db, testCase.Cypher, params, iterations)
+	rowCount, logicalDigest, stats, err := measureCypher(ctx, s.db, testCase.Cypher, params, iterations)
 	if err != nil {
 		record.Status = StatusError
 		record.Error = err.Error()
@@ -145,10 +227,11 @@ func (s *postgresSQLRunner) runCase(ctx context.Context, iterations int, testCas
 	}
 
 	record.RowCount = rowCount
+	record.LogicalDigest = logicalDigest
 	record.Stats = stats
 	applyRowExpectation(&record)
 
-	explain, err := s.explain(ctx, testCase.Cypher, params)
+	explain, err := s.explain(ctx, translation)
 	if err != nil {
 		if record.Status == StatusOK {
 			record.Status = StatusError
@@ -159,37 +242,134 @@ func (s *postgresSQLRunner) runCase(ctx context.Context, iterations int, testCas
 
 	record.SQL = explain.SQL
 	record.PostgresPlan = explain.Plan
+	record.PostgresPlanJSON = explain.Structured.Plan
 	record.PostgresMetrics = &explain.Metrics
+	record.PostgresLeaves = &explain.Structured.Leaves
+	record.PostgresLayout = &s.health
+	storage := s.storage
+	record.PostgresStorage = &storage
 	record.Optimization = &explain.Optimization
 	return record
+}
+
+func (s *postgresSQLRunner) verifyReset(ctx context.Context) error {
+	maintenance, err := s.openMaintenance(ctx)
+	if err != nil {
+		return err
+	}
+	defer maintenance.Close(ctx)
+	var edges, identities, propertyClaims int64
+	if err := maintenance.QueryRow(ctx, `select
+(select count(*) from public.edge),
+(select count(*) from public.edge_identity),
+(select count(*) from public.edge_property_unique_value)`).Scan(&edges, &identities, &propertyClaims); err != nil {
+		return err
+	}
+	if edges != 0 || identities != 0 || propertyClaims != 0 {
+		return fmt.Errorf("reset left edges=%d identity_claims=%d property_claims=%d", edges, identities, propertyClaims)
+	}
+	return nil
+}
+
+func (s *postgresSQLRunner) vacuumAnalyzeAndMeasure(ctx context.Context) error {
+	maintenance, err := s.openMaintenance(ctx)
+	if err != nil {
+		return err
+	}
+	defer maintenance.Close(ctx)
+	rows, err := maintenance.Query(ctx, `select graph_id,kind_id from public.dawgs_edge_kind_leaf
+where lifecycle_state='active' order by graph_id,kind_id`)
+	if err != nil {
+		return err
+	}
+	var leaves []pg.LeafReference
+	for rows.Next() {
+		var leaf pg.LeafReference
+		if err := rows.Scan(&leaf.GraphID, &leaf.KindID); err != nil {
+			rows.Close()
+			return err
+		}
+		leaves = append(leaves, leaf)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	for _, leaf := range leaves {
+		relation := pgx.Identifier{"public", fmt.Sprintf("edge_%d_%d", leaf.GraphID, leaf.KindID)}.Sanitize()
+		if _, err := maintenance.Exec(ctx, "VACUUM (ANALYZE) "+relation); err != nil {
+			return err
+		}
+	}
+	var analyzedAt pgtype.Timestamptz
+	storage := PostgresStorage{LeafCount: int64(len(leaves))}
+	if err := maintenance.QueryRow(ctx, `with leaves as (
+  select c.oid,c.reltoastrelid from public.dawgs_edge_kind_leaf l
+  join pg_catalog.pg_class c on c.relname=pg_catalog.format('edge_%s_%s',l.graph_id,l.kind_id)
+  join pg_catalog.pg_namespace n on n.oid=c.relnamespace and n.nspname='public'
+  where l.lifecycle_state='active'
+), sizes as (
+  select coalesce(sum(pg_catalog.pg_relation_size(oid)),0) heap,
+         coalesce(sum(pg_catalog.pg_indexes_size(oid)),0) indexes,
+         coalesce(sum(case when reltoastrelid=0 then 0 else pg_catalog.pg_total_relation_size(reltoastrelid) end),0) toast
+  from leaves
+)
+select heap,indexes,toast,heap+indexes+toast,
+  (select min(greatest(coalesce(s.last_analyze,'epoch'::timestamptz),coalesce(s.last_autoanalyze,'epoch'::timestamptz)))
+   from leaves l join pg_catalog.pg_stat_all_tables s on s.relid=l.oid)
+from sizes`).Scan(&storage.HeapBytes, &storage.IndexBytes, &storage.ToastBytes, &storage.TotalBytes, &analyzedAt); err != nil {
+		return err
+	}
+	if len(leaves) > 0 && (!analyzedAt.Valid || analyzedAt.Time.IsZero()) {
+		return fmt.Errorf("one or more active leaves have no analyze timestamp")
+	}
+	if analyzedAt.Valid {
+		storage.AnalyzedAt = analyzedAt.Time.UTC()
+	}
+	s.storage = storage
+	return nil
 }
 
 type postgresExplain struct {
 	SQL          string
 	Plan         []string
 	Metrics      PostgresPlanMetrics
+	Structured   pg.StructuredExplain
 	Optimization translate.OptimizationSummary
 }
 
-func (s *postgresSQLRunner) explain(ctx context.Context, cypherQuery string, params map[string]any) (postgresExplain, error) {
-	regularQuery, err := frontend.ParseCypher(frontend.NewContext(), cypherQuery)
-	if err != nil {
-		return postgresExplain{}, err
+func (s *postgresSQLRunner) explain(ctx context.Context, translation translate.Result) (postgresExplain, error) {
+	if translation.HasMutations {
+		return postgresExplain{}, frontend.ErrMutationNotAllowed
 	}
-
-	translation, err := translate.Translate(ctx, regularQuery, s.pgDriver.KindMapper(), params, s.graphID)
-	if err != nil {
-		return postgresExplain{}, err
-	}
-
 	sqlQuery, err := translate.Translated(translation)
 	if err != nil {
 		return postgresExplain{}, err
 	}
 
-	var plan []string
+	var structured pg.StructuredExplain
 	if err := s.db.ReadTransaction(ctx, func(tx graph.Transaction) error {
-		result := tx.Raw("EXPLAIN (ANALYZE, BUFFERS, TIMING OFF) "+sqlQuery, translation.Parameters)
+		inventoryResult := tx.Raw(`select graph_id,kind_id from public.dawgs_edge_kind_leaf
+where lifecycle_state='active' order by graph_id,kind_id`, nil)
+		var inventory []pg.LeafReference
+		for inventoryResult.Next() {
+			values := inventoryResult.Values()
+			if len(values) != 2 {
+				continue
+			}
+			graphID, graphOK := postgresInteger(values[0])
+			kindID, kindOK := postgresInteger(values[1])
+			if graphOK && kindOK {
+				inventory = append(inventory, pg.LeafReference{GraphID: int32(graphID), KindID: int16(kindID)})
+			}
+		}
+		if err := inventoryResult.Error(); err != nil {
+			inventoryResult.Close()
+			return err
+		}
+		inventoryResult.Close()
+		result := tx.Raw("EXPLAIN (ANALYZE, BUFFERS, TIMING OFF, FORMAT JSON) "+sqlQuery, translation.Parameters)
 		defer result.Close()
 
 		for result.Next() {
@@ -197,21 +377,50 @@ func (s *postgresSQLRunner) explain(ctx context.Context, cypherQuery string, par
 			if len(values) == 0 {
 				continue
 			}
-
-			plan = append(plan, fmt.Sprint(values[0]))
+			var err error
+			structured, err = pg.DecodeStructuredExplain(values[0], inventory)
+			return err
 		}
-
-		return result.Error()
+		if err := result.Error(); err != nil {
+			return err
+		}
+		if len(structured.Plan) == 0 {
+			return fmt.Errorf("PostgreSQL EXPLAIN returned no JSON plan")
+		}
+		return nil
 	}); err != nil {
 		return postgresExplain{}, err
 	}
 
 	return postgresExplain{
 		SQL:          sqlQuery,
-		Plan:         plan,
-		Metrics:      parsePostgresPlanMetrics(plan),
+		Plan:         []string{string(structured.Plan)},
+		Metrics:      structuredPlanMetrics(structured.Metrics),
+		Structured:   structured,
 		Optimization: translation.Optimization,
 	}, nil
+}
+
+func postgresInteger(value any) (int64, bool) {
+	switch typed := value.(type) {
+	case int16:
+		return int64(typed), true
+	case int32:
+		return int64(typed), true
+	case int64:
+		return typed, true
+	case int:
+		return int64(typed), true
+	default:
+		return 0, false
+	}
+}
+
+func structuredPlanMetrics(metrics pg.ExplainMetrics) PostgresPlanMetrics {
+	return PostgresPlanMetrics{PlanningMS: metrics.PlanningMS, ExecutionMS: metrics.ExecutionMS,
+		Buffers: Buffers{SharedHit: metrics.Buffers.SharedHit, SharedRead: metrics.Buffers.SharedRead,
+			SharedDirtied: metrics.Buffers.SharedDirtied, TempRead: metrics.Buffers.TempRead,
+			TempWritten: metrics.Buffers.TempWritten}}
 }
 
 var (

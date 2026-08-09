@@ -30,11 +30,108 @@ export CONNECTION_STRING="postgresql://dawgs:weneedbetterpasswords@localhost:654
 make test_integration
 ```
 
+For an isolated temporary cluster using the locally installed PostgreSQL
+server version, use the repository harness:
+
+```bash
+make test_integration_pg_temp
+```
+
+Because production V2 activation remains closed, the temporary-cluster target
+adds the non-shipping `dawgs_rehearsal` build tag. To run the full unit and
+integration validation against a script-owned cluster, use:
+
+```bash
+scripts/test-postgres --profile fast-read run -- \
+  scripts/prepare-test-pg -- make test_all TEST_TAGS=dawgs_rehearsal
+```
+
+The harness uses the locally installed PostgreSQL server tools and removes the
+cluster after the command finishes. Named instances can be kept alive for
+debugging or run in parallel:
+
+```bash
+scripts/test-postgres up worker-1
+eval "$(scripts/test-postgres env worker-1)"
+make test_integration
+scripts/test-postgres down worker-1
+
+scripts/test-postgres run worker-2 -- make test_integration
+```
+
+Select `--profile fast-read` for disposable read attribution or
+`--profile durable` for durability-sensitive write, WAL, and migration tests.
+The harness records the live durability, WAL, and checkpoint settings in each
+instance's mode-0600 state file. `--log-output /absolute/path` exports a
+sanitized server log before teardown.
+
+Set `DAWGS_TEST_POSTGRES_ROOT` to move the ephemeral cluster state from its
+default location under `${TMPDIR:-/tmp}`. Instance names are isolated and each
+cluster receives a dynamically allocated localhost port.
+
 Use this module from another Go project:
 
 ```bash
 go get github.com/specterops/dawgs
 ```
+
+### PostgreSQL V2 layout and upgrades
+
+> **Unreleased transition:** the V2 migrator and bootstrap path are currently
+> restricted to identity-guarded disposable databases. Runtime activation and
+> destructive legacy cleanup remain activation-interlocked until every gate in
+> `gaps_plan.md` passes. Restore/rebind and cleanup are executable only in the
+> identity-guarded disposable rehearsal harness.
+
+The PostgreSQL driver operates only on the V2 edge layout: edges are first
+partitioned by graph and then by relationship kind. Translated SQL targets the
+stable graph parents (`public.node_<graph_id>` and
+`public.edge_<graph_id>`), while PostgreSQL routes writes to
+`edge_<graph_id>_<kind_id>` leaves. Edge IDs and edge property constraints are
+enforced graph-wide across those leaves by database registries and triggers.
+
+An existing V1 database is never upgraded implicitly by `AssertSchema`.
+Application operations return `pg.ErrMigrationRequired`; use the offline
+`dawgs-pg-migrate` artifact instead:
+
+```bash
+make build_pg_migrate
+bin/dawgs-pg-migrate preflight --connection-file operator.json --manifest manifest.json --report preflight.json
+```
+
+Preflight and every migration confirmation also require the direct target,
+complete writer-probe set, dormant preparation role, capacity evidence, and a
+recent restore-tested backup evidence file. `migrate` installs only the durable
+writer fence. `verify-fence` is confirmed once for database probes and again
+for credential retirement; only a separately confirmed `resume` may begin
+bounded copy. See the runbook for the complete unreleased rehearsal syntax.
+
+Fresh V2 rehearsal uses the same control and receipt tables:
+
+```bash
+bin/dawgs-pg-migrate bootstrap --connection-file operator.json --unreleased-disposable --report bootstrap.json
+bin/dawgs-pg-migrate confirm --action bootstrap-handoff --connection-file operator.json \
+  --migration-id OPERATION_ID --target-connection-file target.json --report handoff-confirmation.json
+bin/dawgs-pg-migrate complete-bootstrap --connection-file operator.json --migration-id OPERATION_ID \
+  --target-connection-file target.json --retirement-connection-file coordinator.json \
+  --confirm TOKEN --unreleased-disposable --report handoff.json
+```
+
+The final bootstrap and migration acceptance transaction uses the directly
+authenticated coordinator to transfer managed objects from the restricted
+operator to the distinct database-owning `NOLOGIN` role. The target receives
+only data privileges and the fixed-search-path graph/leaf provisioning
+routines; it never receives schema `CREATE`.
+
+The runtime currently rejects all V2 activation, including accepted rehearsal
+states. Before
+acceptance, `rollback` restores the detached V1 graph partitions; after
+acceptance, recovery is forward repair or restore followed by `rebind-restore`
+and a fresh target smoke. Cleanup consumes only the immutable accepted object
+map and requires current identity/smoke, configured soak, fresh backup/restore,
+complete fleet/V1-retirement evidence, and a one-use confirmation. Both
+destructive paths remain restricted to disposable rehearsals.
+See [the migrator runbook](cmd/pgmigrate/README.md).
 
 `make quality_backend` captures PostgreSQL and Neo4j integration results for backend equivalence comparison. It requires
 `PG_CONNECTION_STRING` and `NEO4J_CONNECTION_STRING`. `make quality_bench` writes benchmark markdown and JSON captures
@@ -53,16 +150,22 @@ Use `cmd/benchdiff` to compare benchmarks between two committed refs without cha
 go run ./cmd/benchdiff -base main -target HEAD -kind unit
 ```
 
-For integration benchmark comparisons, provide the same `CONNECTION_STRING` used by integration tests:
+For integration benchmark comparisons, provide two dedicated disposable databases:
 
 ```bash
-export CONNECTION_STRING="postgresql://dawgs:weneedbetterpasswords@localhost:65432/dawgs"
+export DAWGS_BENCHMARK_DISPOSABLE=1
+export BENCH_BASE_CONNECTION_STRING="postgresql://dawgs:weneedbetterpasswords@localhost:65432/dawgs_base"
+export BENCH_TARGET_CONNECTION_STRING="postgresql://dawgs:weneedbetterpasswords@localhost:65432/dawgs_target"
 go run ./cmd/benchdiff -base main -target HEAD -kind all -driver pg -fail-regression 10%
 ```
 
-The harness writes raw outputs and a Markdown report under `.bench/runs/` by default. The report begins with comparison
-findings, includes the raw `benchstat` output for each benchmark suite, and ends with a table of all captured benchmark
-numbers.
+Integration comparison refuses to run without the disposable marker and two
+distinct database connections; the benchmark runner clears its own fixtures.
+Never point either connection at a semantic-test or application database. The
+harness exports committed refs without changing the active worktree and writes
+mode-0600 versioned envelopes plus comparison JSON under `.bench/runs/`. It
+refuses comparison when fixture, case/unit, parameter, seed, adapter, schedule,
+Go/hardware, or PostgreSQL configuration/extension facts differ.
 
 The integration benchmark runner includes committed `base`, `adcs_fanout`, and `traversal_shapes` datasets by default.
 The traversal shape suite checks expected result counts for chain, fanout, bounded cycle, disconnected,
@@ -92,6 +195,10 @@ APIs. The package exposes CLI-matching default option constructors, structured
 progress callbacks, manifest/metrics helpers, HPKE key envelope reader/writer
 helpers, and typed errors for validation, compatibility, checksum, metrics, and
 count mismatches.
+
+The unreleased PostgreSQL transition tooling is documented in the
+[operator migration and recovery runbook](docs/edge_kind_partitioning_runbook.md)
+and [versioned schema reference](docs/edge_kind_partitioning_schemas.md).
 
 PostgreSQL translates exact string property equality with a JSON string type guard and `properties ->>` extraction, so
 indexes created on expressions such as `properties ->> 'objectid'` and `properties ->> 'name'` can be used for selective

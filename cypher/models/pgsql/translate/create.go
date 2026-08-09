@@ -20,7 +20,7 @@ func sequenceValue(table pgsql.Identifier) pgsql.Expression {
 			pgsql.FunctionCall{
 				Function: pgsql.FunctionPGGetSerialSequence,
 				Parameters: []pgsql.Expression{
-					pgsql.NewLiteral(table.String(), pgsql.Text),
+					pgsql.NewLiteral("public."+table.String(), pgsql.Text),
 					pgsql.NewLiteral(pgsql.ColumnID.String(), pgsql.Text),
 				},
 			},
@@ -450,6 +450,7 @@ func (s *Translator) buildEdgeKindIDExpression(edgeCreate *EdgeCreate) (pgsql.Se
 	if kindIDs, err := s.kindMapper.AssertKinds(edgeCreate.Kinds); err != nil {
 		return nil, fmt.Errorf("failed to translate edge kind: %w", err)
 	} else {
+		s.requiredEdgeKindIDs[kindIDs[0]] = struct{}{}
 		return pgsql.NewLiteral(kindIDs[0], pgsql.Int2), nil
 	}
 }

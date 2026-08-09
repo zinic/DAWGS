@@ -17,9 +17,13 @@
 package main
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/specterops/dawgs/drivers/pg"
 	"github.com/stretchr/testify/require"
 )
 
@@ -27,6 +31,34 @@ func TestComputeDurationStatsRejectsEmptyDurations(t *testing.T) {
 	_, err := computeDurationStats(nil)
 
 	require.ErrorContains(t, err, "at least one duration")
+}
+
+func TestApplyBaselineRequiresCompatibleCasesAndPostgresFacts(t *testing.T) {
+	rowCount := int64(1)
+	base := CaseResult{Source: "case.json", Dataset: "base", Name: "case", Category: "read",
+		ExecutionMode: ModePostgresSQL, Cypher: "match (n) return n", Params: map[string]any{"n": float64(1)},
+		ExpectedRowCount: &rowCount, LogicalDigest: "digest", Stats: DurationStats{Iterations: 3, Median: time.Millisecond},
+		PostgresLayout: &pg.LayoutHealth{LayoutVersion: 2, TopologyFingerprint: "topology", GraphParentCount: 1,
+			KindCount: 2, LeafCount: 2, ServerVersionNum: 180000}, PostgresStorage: &PostgresStorage{LeafCount: 2}}
+	path := filepath.Join(t.TempDir(), "baseline.jsonl")
+	file, err := os.Create(path)
+	require.NoError(t, err)
+	require.NoError(t, json.NewEncoder(file).Encode(base))
+	require.NoError(t, file.Close())
+
+	current := []CaseResult{base}
+	current[0].Stats.Median = 2 * time.Millisecond
+	require.NoError(t, applyBaseline(path, current))
+	require.Equal(t, 2.0, current[0].Baseline.Ratio)
+
+	current = []CaseResult{base}
+	current[0].PostgresLayout = &pg.LayoutHealth{LayoutVersion: 2, TopologyFingerprint: "different", GraphParentCount: 1,
+		KindCount: 2, LeafCount: 2, ServerVersionNum: 180000}
+	require.ErrorContains(t, applyBaseline(path, current), "topology")
+
+	current = []CaseResult{base}
+	current[0].LogicalDigest = "different"
+	require.ErrorContains(t, applyBaseline(path, current), "logical result")
 }
 
 func TestComputeDurationStatsCopiesAndSortsDurations(t *testing.T) {

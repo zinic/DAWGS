@@ -13,6 +13,34 @@ type OutputBuilder struct {
 	StripLiterals         bool
 	parameters            map[string]any
 	builder               *strings.Builder
+	graphScoped           bool
+	graphNode             pgsql.CompoundIdentifier
+	graphEdge             pgsql.CompoundIdentifier
+}
+
+// WithGraphScope renders persistent node and edge roots directly against the
+// graph's physical parents. Scoping at render time avoids copying and walking
+// the complete PostgreSQL AST after translation.
+func (s *OutputBuilder) WithGraphScope(graphID int32) *OutputBuilder {
+	s.graphScoped = true
+	suffix := strconv.FormatInt(int64(graphID), 10)
+	s.graphNode = pgsql.CompoundIdentifier{"public", pgsql.Identifier("node_" + suffix)}
+	s.graphEdge = pgsql.CompoundIdentifier{"public", pgsql.Identifier("edge_" + suffix)}
+	return s
+}
+
+func (s *OutputBuilder) scopePersistentRelation(name pgsql.CompoundIdentifier) pgsql.CompoundIdentifier {
+	if !s.graphScoped || len(name) != 1 {
+		return name
+	}
+	switch name[0] {
+	case pgsql.TableNode:
+		return s.graphNode
+	case pgsql.TableEdge:
+		return s.graphEdge
+	default:
+		return name
+	}
 }
 
 func NewOutputBuilder() *OutputBuilder {
@@ -329,7 +357,7 @@ func formatNode(builder *OutputBuilder, rootExpr pgsql.SyntaxNode) error {
 				exprStack = append(exprStack, typedNextExpr.Binding.Value, pgsql.FormattingLiteral(" "))
 			}
 
-			exprStack = append(exprStack, typedNextExpr.Name)
+			exprStack = append(exprStack, builder.scopePersistentRelation(typedNextExpr.Name))
 
 		case pgsql.LateralSubquery:
 			if typedNextExpr.Binding.Set {
@@ -537,13 +565,37 @@ func formatNode(builder *OutputBuilder, rootExpr pgsql.SyntaxNode) error {
 			if typedNextExpr.PathIDs == nil {
 				return fmt.Errorf("edge array from path IDs has no path expression")
 			}
+			edgeTargetName := typedNextExpr.EdgeTarget
+			if len(edgeTargetName) == 0 {
+				edgeTargetName = pgsql.TableEdge.AsCompoundIdentifier()
+			}
+			edgeTargetName = builder.scopePersistentRelation(edgeTargetName)
+			edgeTarget := "edge"
+			if len(edgeTargetName) > 0 {
+				if formattedTarget, err := SyntaxNode(edgeTargetName); err != nil {
+					return err
+				} else {
+					edgeTarget = formattedTarget
+				}
+			}
 
-			exprStack = append(
-				exprStack,
-				pgsql.FormattingLiteral(") with ordinality as _path(id, ordinality) join edge _edge on _edge.id = _path.id)"),
-				typedNextExpr.PathIDs,
-				pgsql.FormattingLiteral("(select coalesce(array_agg((_edge.id, _edge.start_id, _edge.end_id, _edge.kind_id, _edge.properties)::edgecomposite order by _path.ordinality), array []::edgecomposite[]) from unnest("),
-			)
+			if len(typedNextExpr.KindIDs) > 0 {
+				exprStack = append(
+					exprStack,
+					pgsql.FormattingLiteral("))"),
+					pgsql.NewLiteral(typedNextExpr.KindIDs, pgsql.Int2Array),
+					pgsql.FormattingLiteral(") with ordinality as _path(id, ordinality) join "+edgeTarget+" _edge on _edge.id = _path.id and _edge.kind_id = any("),
+					typedNextExpr.PathIDs,
+					pgsql.FormattingLiteral("(select coalesce(array_agg((_edge.id, _edge.start_id, _edge.end_id, _edge.kind_id, _edge.properties)::edgecomposite order by _path.ordinality), array []::edgecomposite[]) from unnest("),
+				)
+			} else {
+				exprStack = append(
+					exprStack,
+					pgsql.FormattingLiteral(") with ordinality as _path(id, ordinality) join "+edgeTarget+" _edge on _edge.id = _path.id)"),
+					typedNextExpr.PathIDs,
+					pgsql.FormattingLiteral("(select coalesce(array_agg((_edge.id, _edge.start_id, _edge.end_id, _edge.kind_id, _edge.properties)::edgecomposite order by _path.ordinality), array []::edgecomposite[]) from unnest("),
+				)
+			}
 
 		case pgsql.Parameter:
 			if builder.MaterializeParameters {

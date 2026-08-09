@@ -51,6 +51,12 @@ type transaction struct {
 	tx                 pgx.Tx
 	targetSchema       graph.Graph
 	targetSchemaSet    bool
+	pendingGraphs      map[string]model.Graph
+	pendingKinds       map[graph.Kind]int16
+	pendingKindIDs     map[int16]graph.Kind
+	pendingDefault     *model.Graph
+	pendingDefaultName string
+	writable           bool
 }
 
 func newTransactionWrapper(ctx context.Context, conn *pgxpool.Conn, schemaManager *SchemaManager, cfg *Config, allocateTransaction bool) (*transaction, error) {
@@ -61,6 +67,10 @@ func newTransactionWrapper(ctx context.Context, conn *pgxpool.Conn, schemaManage
 		ctx:                ctx,
 		conn:               conn,
 		targetSchemaSet:    false,
+		pendingGraphs:      map[string]model.Graph{},
+		pendingKinds:       map[graph.Kind]int16{},
+		pendingKindIDs:     map[int16]graph.Kind{},
+		writable:           cfg.Options.AccessMode != pgx.ReadOnly,
 	}
 
 	if allocateTransaction {
@@ -102,6 +112,7 @@ func (s *transaction) Close() {
 		s.tx.Rollback(s.ctx)
 		s.tx = nil
 	}
+	s.discardPending()
 }
 
 func (s *transaction) getTargetGraph() (model.Graph, error) {
@@ -114,7 +125,10 @@ func (s *transaction) getTargetGraph() (model.Graph, error) {
 		}
 	}
 
-	return s.schemaManager.AssertGraph(s, s.targetSchema)
+	if s.writable {
+		return s.schemaManager.AssertGraph(s, s.targetSchema)
+	}
+	return s.schemaManager.lookupGraph(s, s.targetSchema.Name)
 }
 
 func (s *transaction) targetGraphID() (int32, error) {
@@ -128,14 +142,14 @@ func (s *transaction) targetGraphID() (int32, error) {
 func (s *transaction) CreateNode(properties *graph.Properties, kinds ...graph.Kind) (*graph.Node, error) {
 	if graphTarget, err := s.getTargetGraph(); err != nil {
 		return nil, err
-	} else if kindIDSlice, err := s.schemaManager.AssertKinds(s.ctx, kinds); err != nil {
+	} else if kindIDSlice, err := s.schemaManager.assertKindsInTransaction(s, kinds); err != nil {
 		return nil, err
 	} else if propertiesJSONB, err := pgsql.PropertiesToJSONB(properties); err != nil {
 		return nil, err
 	} else {
 		var (
 			node   graph.Node
-			result = s.Raw(createNodeStatement, map[string]any{
+			result = s.Raw(fmt.Sprintf(createNodeStatement, qualifiedManagedRelation(graphTarget.Partitions.Node.Name)), map[string]any{
 				"graph_id":   graphTarget.ID,
 				"kind_ids":   kindIDSlice,
 				"properties": propertiesJSONB,
@@ -182,21 +196,23 @@ func (s *transaction) UpdateNode(node *graph.Node) error {
 
 func (s *transaction) Nodes() graph.NodeQuery {
 	return &nodeQuery{
-		liveQuery: newLiveQuery(s.ctx, s, s.schemaManager, s.targetGraphID),
+		liveQuery: newLiveQuery(s.ctx, s, s, s.targetGraphID),
 	}
 }
 
 func (s *transaction) CreateRelationshipByIDs(startNodeID, endNodeID graph.ID, kind graph.Kind, properties *graph.Properties) (*graph.Relationship, error) {
 	if graphTarget, err := s.getTargetGraph(); err != nil {
 		return nil, err
-	} else if kindIDSlice, err := s.schemaManager.AssertKinds(s.ctx, graph.Kinds{kind}); err != nil {
+	} else if kindIDSlice, err := s.schemaManager.assertKindsInTransaction(s, graph.Kinds{kind}); err != nil {
+		return nil, err
+	} else if _, err := s.schemaManager.EnsureEdgeKindPartitions(s, graphTarget.ID, kindIDSlice); err != nil {
 		return nil, err
 	} else if propertiesJSONB, err := pgsql.PropertiesToJSONB(properties); err != nil {
 		return nil, err
 	} else {
 		var (
 			edge   graph.Relationship
-			result = s.Raw(createEdgeStatement, map[string]any{
+			result = s.Raw(fmt.Sprintf(createEdgeStatement, qualifiedManagedRelation(graphTarget.Partitions.Edge.Name)), map[string]any{
 				"graph_id":   graphTarget.ID,
 				"start_id":   startNodeID,
 				"end_id":     endNodeID,
@@ -254,13 +270,17 @@ func (s *transaction) UpdateRelationship(relationship *graph.Relationship) error
 		statement = edgePropertyDeleteOnlyStatement
 	}
 
-	_, err := s.driver().Exec(s.ctx, statement, append(arguments, relationship.ID)...)
+	graphTarget, err := s.getTargetGraph()
+	if err != nil {
+		return err
+	}
+	_, err = s.driver().Exec(s.ctx, fmt.Sprintf(statement, qualifiedManagedRelation(graphTarget.Partitions.Edge.Name)), append(arguments, relationship.ID)...)
 	return err
 }
 
 func (s *transaction) Relationships() graph.RelationshipQuery {
 	return &relationshipQuery{
-		liveQuery: newLiveQuery(s.ctx, s, s.schemaManager, s.targetGraphID),
+		liveQuery: newLiveQuery(s.ctx, s, s, s.targetGraphID),
 	}
 }
 
@@ -279,12 +299,22 @@ func (s *transaction) Query(query string, parameters map[string]any) graph.Resul
 		return graph.NewErrorResult(err)
 	} else if graphTarget, err := s.getTargetGraph(); err != nil {
 		return graph.NewErrorResult(err)
-	} else if translated, err := translate.Translate(s.ctx, parsedQuery, s.schemaManager, parameters, graphTarget.ID); err != nil {
-		return graph.NewErrorResult(err)
-	} else if sqlQuery, err := translate.Translated(translated); err != nil {
+	} else if translated, err := translate.Translate(s.ctx, parsedQuery, s, parameters, graphTarget.ID); err != nil {
 		return graph.NewErrorResult(err)
 	} else {
-		return s.Raw(sqlQuery, translated.Parameters)
+		if translated.HasMutations {
+			if !s.writable {
+				return graph.NewErrorResult(fmt.Errorf("mutating Cypher query requires a write transaction"))
+			}
+			if _, err := s.schemaManager.EnsureEdgeKindPartitions(s, graphTarget.ID, translated.RequiredEdgeKindIDs); err != nil {
+				return graph.NewErrorResult(err)
+			}
+		}
+		if sqlQuery, err := translate.Translated(translated); err != nil {
+			return graph.NewErrorResult(err)
+		} else {
+			return s.Raw(sqlQuery, translated.Parameters)
+		}
 	}
 }
 
@@ -295,15 +325,92 @@ func (s *transaction) Raw(query string, parameters map[string]any) graph.Result 
 		return &queryResult{
 			ctx:        s.ctx,
 			rows:       rows,
-			kindMapper: s.schemaManager,
+			kindMapper: s,
 		}
 	}
 }
 
+// ExecSimple executes a trusted, parameter-free SQL script on the transaction's
+// physical connection. PostgreSQL's extended protocol accepts only one command
+// per prepared statement, while the embedded schema assets intentionally
+// contain function bodies and multiple DDL commands.
+func (s *transaction) ExecSimple(statement string) error {
+	var connection *pgx.Conn
+	if s.tx != nil {
+		connection = s.tx.Conn()
+	} else {
+		connection = s.conn.Conn()
+	}
+
+	_, err := connection.PgConn().Exec(s.ctx, statement).ReadAll()
+	return err
+}
+
 func (s *transaction) Commit() error {
 	if s.tx != nil {
-		return s.tx.Commit(s.ctx)
+		err := s.tx.Commit(s.ctx)
+		s.tx = nil
+		if err != nil {
+			s.schemaManager.invalidateCaches()
+			s.discardPending()
+			return err
+		}
+		s.schemaManager.publishPending(s)
 	}
 
 	return nil
+}
+
+func (s *transaction) discardPending() {
+	s.pendingGraphs = map[string]model.Graph{}
+	s.pendingKinds = map[graph.Kind]int16{}
+	s.pendingKindIDs = map[int16]graph.Kind{}
+	s.pendingDefault = nil
+	s.pendingDefaultName = ""
+}
+
+func (s *transaction) MapKind(ctx context.Context, kind graph.Kind) (int16, error) {
+	ids, err := s.MapKinds(ctx, graph.Kinds{kind})
+	if err != nil {
+		return 0, err
+	}
+	return ids[0], nil
+}
+
+func (s *transaction) MapKinds(_ context.Context, kinds graph.Kinds) ([]int16, error) {
+	s.schemaManager.lock.RLock()
+	defer s.schemaManager.lock.RUnlock()
+	ids, missing := s.schemaManager.mapKindsInTransaction(s, kinds)
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("unable to map kinds: %v", missing)
+	}
+	return ids, nil
+}
+
+func (s *transaction) AssertKinds(_ context.Context, kinds graph.Kinds) ([]int16, error) {
+	return s.schemaManager.assertKindsInTransaction(s, kinds)
+}
+
+func (s *transaction) MapKindID(ctx context.Context, kindID int16) (graph.Kind, error) {
+	kinds, err := s.MapKindIDs(ctx, []int16{kindID})
+	if err != nil {
+		return nil, err
+	}
+	return kinds[0], nil
+}
+
+func (s *transaction) MapKindIDs(_ context.Context, kindIDs []int16) (graph.Kinds, error) {
+	s.schemaManager.lock.RLock()
+	defer s.schemaManager.lock.RUnlock()
+	kinds := make(graph.Kinds, 0, len(kindIDs))
+	for _, kindID := range kindIDs {
+		if kind, found := s.pendingKindIDs[kindID]; found {
+			kinds = append(kinds, kind)
+		} else if kind, found := s.schemaManager.kindIDsByKind[kindID]; found {
+			kinds = append(kinds, kind)
+		} else {
+			return nil, fmt.Errorf("unable to map kind id %d", kindID)
+		}
+	}
+	return kinds, nil
 }

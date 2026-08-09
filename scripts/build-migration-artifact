@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+readonly output_dir="${1:?output directory is required}"
+readonly artifact_version="${2:?artifact version is required}"
+readonly source_revision="${3:?source revision is required}"
+readonly repository_root="$(git rev-parse --show-toplevel)"
+readonly committed_revision="$(git rev-parse HEAD)"
+temporary_directory=""
+
+cleanup() {
+    local status=$?
+    trap - EXIT HUP INT TERM
+    if [[ -n "${temporary_directory}" && -d "${temporary_directory}" ]]; then
+        rm -rf -- "${temporary_directory}"
+    fi
+    return "${status}"
+}
+trap cleanup EXIT HUP INT TERM
+
+[[ "${source_revision}" == "${committed_revision}" ]] || {
+    printf 'source revision %s does not match committed HEAD %s\n' "${source_revision}" "${committed_revision}" >&2
+    exit 1
+}
+[[ -z "$(git status --porcelain --untracked-files=all)" ]] || {
+    printf 'migration artifact build requires a clean checkout\n' >&2
+    exit 1
+}
+
+mkdir -p -- "${output_dir}"
+temporary_directory="$(mktemp -d "${TMPDIR:-/tmp}/dawgs-migrator-build.XXXXXXXX")"
+mkdir -p -- "${temporary_directory}/source"
+git archive --format=tar "${committed_revision}" | tar -xf - -C "${temporary_directory}/source"
+
+build_binary() {
+    local source_dir="$1" destination="$2"
+    (
+        cd "${source_dir}"
+        CGO_ENABLED=0 go build -trimpath -buildvcs=false \
+            -ldflags "-X main.version=${artifact_version} -X main.sourceRevision=${source_revision}" \
+            -o "${destination}" ./cmd/pgmigrate
+    )
+}
+
+build_binary "${repository_root}" "${repository_root}/${output_dir}/dawgs-pg-migrate"
+build_binary "${temporary_directory}/source" "${temporary_directory}/dawgs-pg-migrate"
+cmp "${repository_root}/${output_dir}/dawgs-pg-migrate" "${temporary_directory}/dawgs-pg-migrate"
+
+(
+    cd "${repository_root}/${output_dir}"
+    sha256sum dawgs-pg-migrate > dawgs-pg-migrate.sha256
+)
+go version -m "${repository_root}/${output_dir}/dawgs-pg-migrate" > "${repository_root}/${output_dir}/dawgs-pg-migrate.metadata.txt"
+"${repository_root}/${output_dir}/dawgs-pg-migrate" version | grep -F "${artifact_version} (${source_revision})"
+if ldd "${repository_root}/${output_dir}/dawgs-pg-migrate" >/dev/null 2>&1; then
+    printf 'migrator artifact is dynamically linked\n' >&2
+    exit 1
+fi
+
+(
+    cd "${repository_root}"
+    sha256sum \
+        go.mod go.sum \
+        drivers/pg/migrate/testdata/v1_schema.sql \
+        drivers/pg/migrate/testdata/v1_schema_down.sql \
+		drivers/pg/migrate/testdata/v1_client_go.mod \
+		drivers/pg/migrate/testdata/v1_export_client.go.txt \
+        drivers/pg/migrate/testdata/v1_source_manifest.json \
+        drivers/pg/internal/schema/sql/schema_up.sql \
+        drivers/pg/internal/schema/sql/schema_down.sql \
+        docs/edge_kind_partitioning_runbook.md \
+        docs/edge_kind_partitioning_schemas.md \
+		docs/edge_kind_partitioning_archive_policy.md \
+		docs/schemas/archive-manifest-v1.schema.json \
+        docs/schemas/fleet-ledger-v1.schema.json \
+        > "${output_dir}/dawgs-pg-migrate.inputs.sha256"
+)
+cp "${repository_root}/docs/edge_kind_partitioning_archive_policy.md" "${repository_root}/${output_dir}/archive-policy.md"
+
+(
+    cd "${repository_root}/${output_dir}"
+    sha256sum -c dawgs-pg-migrate.sha256
+    sha256sum archive-policy.md dawgs-pg-migrate.metadata.txt dawgs-pg-migrate.inputs.sha256 > dawgs-pg-migrate.publication.sha256
+)

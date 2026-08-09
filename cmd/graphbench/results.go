@@ -17,6 +17,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,6 +28,7 @@ import (
 	"time"
 
 	"github.com/specterops/dawgs/cypher/models/pgsql/translate"
+	"github.com/specterops/dawgs/drivers/pg"
 )
 
 const (
@@ -57,6 +59,21 @@ type Buffers struct {
 	TempWritten   int64 `json:"temp_written,omitempty"`
 }
 
+type PostgresStorage struct {
+	LeafCount  int64     `json:"leaf_count"`
+	HeapBytes  int64     `json:"heap_bytes"`
+	IndexBytes int64     `json:"index_bytes"`
+	ToastBytes int64     `json:"toast_bytes"`
+	TotalBytes int64     `json:"total_bytes"`
+	AnalyzedAt time.Time `json:"analyzed_at"`
+}
+
+type ClientPhaseMetrics struct {
+	ParseNS     int64 `json:"parse_ns"`
+	TranslateNS int64 `json:"translate_ns"`
+	RenderNS    int64 `json:"render_ns"`
+}
+
 type CaseResult struct {
 	Source           string                         `json:"source"`
 	Dataset          string                         `json:"dataset"`
@@ -69,10 +86,16 @@ type CaseResult struct {
 	NodeParams       map[string]string              `json:"node_params,omitempty"`
 	ExpectedRowCount *int64                         `json:"expected_row_count,omitempty"`
 	RowCount         int64                          `json:"row_count,omitempty"`
+	LogicalDigest    string                         `json:"logical_digest,omitempty"`
 	Stats            DurationStats                  `json:"stats,omitempty"`
+	ClientPhases     *ClientPhaseMetrics            `json:"client_phases,omitempty"`
 	SQL              string                         `json:"sql,omitempty"`
 	PostgresPlan     []string                       `json:"postgres_plan,omitempty"`
+	PostgresPlanJSON json.RawMessage                `json:"postgres_plan_json,omitempty"`
 	PostgresMetrics  *PostgresPlanMetrics           `json:"postgres_metrics,omitempty"`
+	PostgresLeaves   *pg.ExplainLeafSummary         `json:"postgres_leaves,omitempty"`
+	PostgresLayout   *pg.LayoutHealth               `json:"postgres_layout,omitempty"`
+	PostgresStorage  *PostgresStorage               `json:"postgres_storage,omitempty"`
 	Neo4jPlan        *Neo4jPlanNode                 `json:"neo4j_plan,omitempty"`
 	Neo4jOperators   []string                       `json:"neo4j_operators,omitempty"`
 	Optimization     *translate.OptimizationSummary `json:"optimization,omitempty"`
@@ -208,13 +231,27 @@ func applyBaseline(path string, records []CaseResult) error {
 
 	byKey := make(map[string]CaseResult, len(baseline))
 	for _, record := range baseline {
-		byKey[resultKey(record.Dataset, record.Name, record.ExecutionMode)] = record
+		key := resultKey(record.Dataset, record.Name, record.ExecutionMode)
+		if _, duplicate := byKey[key]; duplicate {
+			return fmt.Errorf("baseline contains duplicate case %q", key)
+		}
+		byKey[key] = record
+	}
+	if len(byKey) != len(records) {
+		return fmt.Errorf("baseline case count %d differs from current case count %d", len(byKey), len(records))
 	}
 
 	for idx := range records {
 		record := &records[idx]
-		previous, found := byKey[resultKey(record.Dataset, record.Name, record.ExecutionMode)]
-		if !found || previous.Stats.Iterations == 0 || record.Stats.Iterations == 0 || previous.Stats.Median == 0 {
+		key := resultKey(record.Dataset, record.Name, record.ExecutionMode)
+		previous, found := byKey[key]
+		if !found {
+			return fmt.Errorf("baseline is missing current case %q", key)
+		}
+		if err := compatibleBaselineCase(previous, *record); err != nil {
+			return fmt.Errorf("baseline case %q is incompatible: %w", key, err)
+		}
+		if previous.Stats.Iterations == 0 || record.Stats.Iterations == 0 || previous.Stats.Median == 0 {
 			continue
 		}
 
@@ -227,6 +264,39 @@ func applyBaseline(path string, records []CaseResult) error {
 	}
 
 	return nil
+}
+
+func compatibleBaselineCase(previous, current CaseResult) error {
+	if previous.Source != current.Source || previous.Category != current.Category || previous.Cypher != current.Cypher ||
+		!canonicalJSONEqual(previous.Params, current.Params) || !canonicalJSONEqual(previous.NodeParams, current.NodeParams) ||
+		!canonicalJSONEqual(previous.ExpectedRowCount, current.ExpectedRowCount) || previous.Stats.Iterations != current.Stats.Iterations {
+		return fmt.Errorf("fixture source, query, parameters, expectation, or iteration schedule differs")
+	}
+	if previous.LogicalDigest != "" && current.LogicalDigest != "" && previous.LogicalDigest != current.LogicalDigest {
+		return fmt.Errorf("exact logical result digest differs")
+	}
+	if (previous.PostgresLayout == nil) != (current.PostgresLayout == nil) {
+		return fmt.Errorf("PostgreSQL layout metadata presence differs")
+	}
+	if previous.PostgresLayout != nil {
+		left, right := previous.PostgresLayout, current.PostgresLayout
+		if left.LayoutVersion != right.LayoutVersion || left.TopologyFingerprint != right.TopologyFingerprint ||
+			left.GraphParentCount != right.GraphParentCount || left.KindCount != right.KindCount || left.LeafCount != right.LeafCount ||
+			left.ServerVersionNum != right.ServerVersionNum {
+			return fmt.Errorf("PostgreSQL layout, topology, or server facts differ")
+		}
+	}
+	if (previous.PostgresStorage == nil) != (current.PostgresStorage == nil) ||
+		(previous.PostgresStorage != nil && previous.PostgresStorage.LeafCount != current.PostgresStorage.LeafCount) {
+		return fmt.Errorf("PostgreSQL storage topology differs")
+	}
+	return nil
+}
+
+func canonicalJSONEqual(left, right any) bool {
+	leftJSON, leftErr := json.Marshal(left)
+	rightJSON, rightErr := json.Marshal(right)
+	return leftErr == nil && rightErr == nil && bytes.Equal(leftJSON, rightJSON)
 }
 
 func resultKey(dataset, name string, mode ExecutionMode) string {

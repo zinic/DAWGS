@@ -46,6 +46,7 @@ type Result struct {
 	RowCount          int64           `json:"row_count"`
 	DistinctRowCount  *int64          `json:"distinct_row_count,omitempty"`
 	DuplicateRowCount *int64          `json:"duplicate_row_count,omitempty"`
+	LogicalDigest     string          `json:"logical_digest,omitempty"`
 	Explain           *ExplainResult  `json:"explain,omitempty"`
 	Stats             Stats           `json:"stats"`
 	Samples           []time.Duration `json:"samples,omitempty"`
@@ -67,8 +68,10 @@ func runScenario(ctx context.Context, db graph.Database, s Scenario, iterations 
 
 	for i := range iterations {
 		start := time.Now()
-		if _, err := runScenarioOnce(ctx, db, s); err != nil {
+		if timedMeasurement, err := runScenarioOnce(ctx, db, s); err != nil {
 			return Result{}, err
+		} else if err := validateMeasurement(measurement, timedMeasurement); err != nil {
+			return Result{}, fmt.Errorf("%s/%s on %s: %w", s.Section, s.Label, s.Dataset, err)
 		}
 		durations[i] = time.Since(start)
 	}
@@ -80,6 +83,7 @@ func runScenario(ctx context.Context, db graph.Database, s Scenario, iterations 
 		RowCount:          measurement.RowCount,
 		DistinctRowCount:  measurement.DistinctRowCount,
 		DuplicateRowCount: measurement.DuplicateRowCount,
+		LogicalDigest:     measurement.LogicalDigest,
 		Stats:             computeStats(append([]time.Duration(nil), durations...)),
 		Samples:           durations,
 	}
@@ -95,6 +99,21 @@ func runScenario(ctx context.Context, db graph.Database, s Scenario, iterations 
 	}
 
 	return result, nil
+}
+
+func validateMeasurement(expected, actual Measurement) error {
+	if expected.RowCount != actual.RowCount || !optionalInt64Equal(expected.DistinctRowCount, actual.DistinctRowCount) ||
+		!optionalInt64Equal(expected.DuplicateRowCount, actual.DuplicateRowCount) || expected.LogicalDigest != actual.LogicalDigest {
+		return fmt.Errorf("timed result differs from warmup")
+	}
+	return nil
+}
+
+func optionalInt64Equal(left, right *int64) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
 }
 
 func validateIterations(iterations int) error {

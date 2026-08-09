@@ -195,6 +195,15 @@ func openDAWGSDatabase(ctx context.Context, connStr string, options openConnecti
 			_ = querier.Close(ctx)
 		}
 	}()
+	if driverName == pg.DriverName {
+		pgQuerier, ok := querier.(*pg.Driver)
+		if !ok {
+			return nil, "", fmt.Errorf("expected *pg.Driver, got %T", querier)
+		}
+		if _, err := pgQuerier.Readiness(ctx); err != nil {
+			return nil, "", fmt.Errorf("PostgreSQL readiness: %w", err)
+		}
+	}
 
 	defaultGraph := graph.Graph{Name: options.defaultGraphName}
 	if err := querier.SetDefaultGraph(ctx, defaultGraph); err != nil {

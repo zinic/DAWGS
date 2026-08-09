@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://specterops.io/dawgs/schemas/archive-manifest-v1.schema.json",
+  "title": "DAWGS edge-kind transition archive manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "archive_id", "source_revision", "created_at", "eol_at", "publication_owner", "retention_owner", "incident_owner", "retrieval_coordinates", "cadence", "postgresql_majors", "artifacts"],
+  "properties": {
+    "version": {"const": 1},
+    "archive_id": {"type": "string", "minLength": 1},
+    "source_revision": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "format": "date-time"},
+    "eol_at": {"type": "string", "format": "date-time"},
+    "publication_owner": {"type": "string", "minLength": 1},
+    "retention_owner": {"type": "string", "minLength": 1},
+    "incident_owner": {"type": "string", "minLength": 1},
+    "retrieval_coordinates": {"type": "string", "minLength": 1},
+    "cadence": {"const": "weekly"},
+    "postgresql_majors": {"type": "array", "minItems": 2, "maxItems": 2, "uniqueItems": true, "items": {"enum": [16, 18]}},
+    "artifacts": {
+      "type": "array",
+      "minItems": 6,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "sha256", "bytes", "kind"],
+        "properties": {
+          "path": {"type": "string", "minLength": 1},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "bytes": {"type": "integer", "minimum": 0},
+          "kind": {"enum": ["binary", "module", "frozen_v1", "schema", "runbook", "evidence_schema", "report", "metadata", "source"]}
+        }
+      }
+    }
+  }
+}

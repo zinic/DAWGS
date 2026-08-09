@@ -1,0 +1,58 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"os"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/specterops/dawgs/drivers/pg"
+	"github.com/specterops/dawgs/graph"
+	"github.com/specterops/dawgs/opengraph"
+	"github.com/specterops/dawgs/util/size"
+)
+
+func main() {
+	if len(os.Args) != 3 {
+		fmt.Fprintln(os.Stderr, "usage: dawgs-v1-export <graph-name> <output>")
+		os.Exit(1)
+	}
+	connStr := os.Getenv("PGCONN")
+	if connStr == "" {
+		fmt.Fprintln(os.Stderr, "PGCONN is required")
+		os.Exit(1)
+	}
+
+	poolCfg, err := pgxpool.ParseConfig(connStr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to parse pool configuration: %v\n", err)
+		os.Exit(1)
+	}
+	pool, err := pg.NewPool(poolCfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to connect: %v\n", err)
+		os.Exit(1)
+	}
+	defer pool.Close()
+
+	db := pg.NewDriver(size.Gibibyte, pool)
+	if err := db.SetDefaultGraph(context.Background(), graph.Graph{Name: os.Args[1]}); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to select graph: %v\n", err)
+		os.Exit(1)
+	}
+	outFile := os.Args[2]
+
+	f, err := os.Create(outFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to create file: %v\n", err)
+		os.Exit(1)
+	}
+	defer f.Close()
+
+	if err := opengraph.Export(context.Background(), db, f); err != nil {
+		fmt.Fprintf(os.Stderr, "export failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Fprintf(os.Stderr, "exported graph to %s\n", outFile)
+}

@@ -64,7 +64,28 @@
       },
       "candidate_modes": ["postgres_sql", "neo4j"],
       "tags": ["count", "typed-count", "graph-stats"]
+    },
+    {
+      "name": "multi_kind_edge_count",
+      "dataset": "base",
+      "category": "counts",
+      "cypher": "MATCH ()-[r:EdgeKind1|EdgeKind2]->() RETURN count(r)",
+      "expected": {"row_count": 1, "result_kind": "scalar"},
+      "observes": {"paths": false, "nodes": false, "relationships": false, "properties": false},
+      "shape": {"edge_kinds": ["EdgeKind1", "EdgeKind2"], "path_materialization_required": false},
+      "candidate_modes": ["postgres_sql", "neo4j"],
+      "tags": ["count", "multi-kind-count", "partition-pruning"]
+    },
+    {
+      "name": "untyped_edge_count",
+      "dataset": "base",
+      "category": "counts",
+      "cypher": "MATCH ()-[r]->() RETURN count(r)",
+      "expected": {"row_count": 1, "result_kind": "scalar"},
+      "observes": {"paths": false, "nodes": false, "relationships": false, "properties": false},
+      "shape": {"path_materialization_required": false},
+      "candidate_modes": ["postgres_sql", "neo4j"],
+      "tags": ["count", "untyped-count", "topology-sensitive"]
     }
   ]
 }
-

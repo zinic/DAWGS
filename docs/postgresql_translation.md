@@ -1,6 +1,6 @@
 # PostgreSQL Translation
 
-DAWGS translates supported Cypher queries to vanilla PostgreSQL 16 SQL. The implementation lives under
+DAWGS translates supported Cypher queries to vanilla PostgreSQL 16 and 18 SQL. The implementation lives under
 [`cypher/models/pgsql`](../cypher/models/pgsql).
 
 ## Package Layout

@@ -28,6 +28,7 @@ type dumpCheckpointIdentity struct {
 	ScrubSaltSHA256   string           `json:"scrub_salt_sha256,omitempty"`
 	ShardSize         int              `json:"shard_size"`
 	BatchSize         int              `json:"batch_size"`
+	PostgresSHA256    string           `json:"postgres_sha256,omitempty"`
 }
 
 type dumpGraphCheckpoint struct {
@@ -48,7 +49,7 @@ type dumpCheckpoint struct {
 	Current  *dumpGraphCheckpoint   `json:"current_graph,omitempty"`
 }
 
-func newDumpCheckpointIdentity(driverName string, targets []GraphTarget, options DumpOptions, activeScrubber *scrubber) (dumpCheckpointIdentity, error) {
+func newDumpCheckpointIdentity(driverName string, targets []GraphTarget, options DumpOptions, activeScrubber *scrubber, source SourceMetadata) (dumpCheckpointIdentity, error) {
 	identity := dumpCheckpointIdentity{
 		Driver:           driverName,
 		Graphs:           make([]string, len(targets)),
@@ -57,6 +58,7 @@ func newDumpCheckpointIdentity(driverName string, targets []GraphTarget, options
 		Scrub:            options.Scrub,
 		ShardSize:        options.ShardSize,
 		BatchSize:        options.BatchSize,
+		PostgresSHA256:   source.PostgresSHA256,
 	}
 	for index, target := range targets {
 		identity.Graphs[index] = target.Name

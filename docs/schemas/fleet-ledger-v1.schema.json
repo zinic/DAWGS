@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://specterops.io/dawgs/schemas/fleet-ledger-v1.schema.json",
+  "title": "DAWGS edge-kind transition fleet ledger v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "ledger_id", "source_revision", "generated_at", "postgresql_majors", "installations"],
+  "properties": {
+    "version": {"const": 1},
+    "ledger_id": {"type": "string", "minLength": 1},
+    "source_revision": {"type": "string", "minLength": 1},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "frozen_at": {"type": "string", "format": "date-time"},
+    "postgresql_majors": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": [16, 18]}},
+    "installations": {"type": "array", "items": {"$ref": "#/$defs/installation"}}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
+    "decommission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "approver_identity", "reason", "ownership_proof_digest", "last_known_state", "writer_retirement_digest", "decommissioned_at", "evidence_digest"],
+      "properties": {
+        "version": {"const": 1},
+        "approver_identity": {"type": "string", "minLength": 1},
+        "reason": {"type": "string", "minLength": 1},
+        "ownership_proof_digest": {"$ref": "#/$defs/sha256"},
+        "last_known_state": {"type": "string", "minLength": 1},
+        "writer_retirement_digest": {"$ref": "#/$defs/sha256"},
+        "decommissioned_at": {"type": "string", "format": "date-time"},
+        "evidence_digest": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "installation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["installation_id", "state", "database_name", "system_identifier", "identity_epoch", "owner_role", "application_version", "runtime_sha256", "migrator_version", "migrator_sha256", "manifest_sha256", "postgresql_version_num", "inventory_digest", "capacity_evidence_digest", "backup_evidence_digest", "writer_evidence_digest", "old_writer_retired"],
+      "properties": {
+        "installation_id": {"type": "string", "minLength": 1},
+        "state": {"enum": ["open", "accepted_v2", "decommissioned"]},
+        "scope_kind": {"enum": ["migration", "bootstrap"]},
+        "database_name": {"type": "string", "minLength": 1},
+        "system_identifier": {"type": "string", "minLength": 1},
+        "identity_epoch": {"type": "integer", "minimum": 1},
+        "owner_role": {"type": "string", "minLength": 1},
+        "target_role": {"type": "string"},
+        "application_version": {"type": "string", "minLength": 1},
+        "runtime_sha256": {"$ref": "#/$defs/sha256"},
+        "migrator_version": {"type": "string", "minLength": 1},
+        "migrator_sha256": {"$ref": "#/$defs/sha256"},
+        "manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "postgresql_version_num": {"type": "integer", "minimum": 160000},
+        "inventory_digest": {"$ref": "#/$defs/sha256"},
+        "capacity_evidence_digest": {"$ref": "#/$defs/sha256"},
+        "backup_evidence_digest": {"$ref": "#/$defs/sha256"},
+        "writer_evidence_digest": {"$ref": "#/$defs/sha256"},
+        "migration_receipt_digest": {"$ref": "#/$defs/sha256"},
+        "validation_receipt_digest": {"$ref": "#/$defs/sha256"},
+        "acceptance_receipt_digest": {"$ref": "#/$defs/sha256"},
+        "smoke_receipt_digest": {"$ref": "#/$defs/sha256"},
+        "cleanup_receipt_digest": {"$ref": "#/$defs/sha256"},
+        "restore_receipt_digest": {"$ref": "#/$defs/sha256"},
+        "final_health_digest": {"$ref": "#/$defs/sha256"},
+        "old_writer_retired": {"type": "boolean"},
+        "blockers": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "decommission": {"$ref": "#/$defs/decommission"}
+      }
+    }
+  }
+}

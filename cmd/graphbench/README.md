@@ -23,6 +23,10 @@ the fixture datasets from `integration/testdata`.
 Connection strings can be supplied as flags or environment variables:
 
 - PostgreSQL: `-pg-connection`, `PG_CONNECTION_STRING`, `-connection`, or `CONNECTION_STRING`.
+- PostgreSQL maintenance: `-pg-maintenance-connection` or
+  `PG_MAINTENANCE_CONNECTION_STRING`. This must be a separate directly
+  authenticated connection to the same database whose role is superuser,
+  database owner, or has `MAINTAIN` on every active leaf.
 - Neo4j: `-neo4j-connection`, `NEO4J_CONNECTION_STRING`, `-connection`, or `CONNECTION_STRING`.
 
 ## Examples
@@ -33,6 +37,7 @@ Run only PostgreSQL SQL translation:
 go run ./cmd/graphbench \
   -modes postgres_sql \
   -pg-connection "$PG_CONNECTION_STRING" \
+  -pg-maintenance-connection "$PG_MAINTENANCE_CONNECTION_STRING" \
   -jsonl-output .coverage/graphbench-postgres.jsonl \
   -summary .coverage/graphbench-postgres.md \
   -summary-json .coverage/graphbench-postgres.json
@@ -67,8 +72,16 @@ go run ./cmd/graphbench \
 JSONL output contains one `CaseResult` record per case and execution mode.
 Markdown and JSON summaries aggregate mode status counts, per-case timings, row
 counts, fallback reasons, and baseline regressions or improvements when a
-baseline capture is supplied.
+baseline capture is supplied. Warmup and timed iterations must match both row
+count and an order-insensitive, duplicate-preserving logical result digest.
+PostgreSQL records also separate parse, translate, and SQL-render client time.
 
 PostgreSQL records include translated SQL and `EXPLAIN (ANALYZE, BUFFERS,
-TIMING OFF, FORMAT JSON)` metrics. Neo4j records include plan operator names
-when an `EXPLAIN` plan can be captured.
+TIMING OFF, FORMAT JSON)` metrics, planned/removed/executed logical leaf sets,
+layout/topology/server facts, summed heap/index/TOAST bytes, and analyze
+freshness. Before each dataset, GraphBench verifies reset registries and runs
+deterministic per-leaf `VACUUM (ANALYZE)` through the maintenance connection.
+The privileged maintenance connection is short-lived and is closed before any
+timed case begins.
+Never use an application or semantic-test database. Neo4j records include plan
+operator names when an `EXPLAIN` plan can be captured.

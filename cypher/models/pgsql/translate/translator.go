@@ -20,15 +20,16 @@ const DefaultGraphID int32 = 0
 type Translator struct {
 	walk.Visitor[cypher.SyntaxNode]
 
-	ctx            context.Context
-	kindMapper     *contextAwareKindMapper
-	graphID        int32
-	parameters     map[string]any
-	translation    Result
-	treeTranslator *ExpressionTreeTranslator
-	query          *Query
-	scope          *Scope
-	unwindTargets  map[*cypher.Variable]struct{}
+	ctx                 context.Context
+	kindMapper          *contextAwareKindMapper
+	graphID             int32
+	parameters          map[string]any
+	translation         Result
+	treeTranslator      *ExpressionTreeTranslator
+	query               *Query
+	scope               *Scope
+	unwindTargets       map[*cypher.Variable]struct{}
+	requiredEdgeKindIDs map[int16]struct{}
 
 	collectIDMembershipAliases map[pgsql.Identifier]struct{}
 	collectIDProjectionDepth   int
@@ -71,14 +72,15 @@ func NewTranslator(ctx context.Context, kindMapper pgsql.KindMapper, parameters 
 		translation: Result{
 			Parameters: translatedParameters,
 		},
-		ctx:            ctx,
-		kindMapper:     ctxAwareKindMapper,
-		graphID:        graphID,
-		parameters:     inputParameters,
-		treeTranslator: NewExpressionTreeTranslator(ctxAwareKindMapper),
-		query:          &Query{},
-		scope:          NewScope(),
-		unwindTargets:  map[*cypher.Variable]struct{}{},
+		ctx:                 ctx,
+		kindMapper:          ctxAwareKindMapper,
+		graphID:             graphID,
+		parameters:          inputParameters,
+		treeTranslator:      NewExpressionTreeTranslator(ctxAwareKindMapper),
+		query:               &Query{},
+		scope:               NewScope(),
+		unwindTargets:       map[*cypher.Variable]struct{}{},
+		requiredEdgeKindIDs: map[int16]struct{}{},
 	}
 }
 
@@ -640,9 +642,12 @@ func (s *Translator) Exit(expression cypher.SyntaxNode) {
 }
 
 type Result struct {
-	Statement    pgsql.Statement
-	Parameters   map[string]any
-	Optimization OptimizationSummary
+	Statement           pgsql.Statement
+	Parameters          map[string]any
+	Optimization        OptimizationSummary
+	GraphID             int32
+	HasMutations        bool
+	RequiredEdgeKindIDs []int16
 }
 
 type OptimizationSummary struct {
@@ -828,14 +833,14 @@ func Translate(ctx context.Context, cypherQuery *cypher.RegularQuery, kindMapper
 		return Result{}, err
 	} else if translated {
 		translator.recordSkippedLowerings()
-		return translator.translation, nil
+		return translator.finalize(), nil
 	}
 
 	if translated, err := translator.translateAggregateTraversalCount(optimizedPlan.Query, optimizedPlan.LoweringPlan); err != nil {
 		return Result{}, err
 	} else if translated {
 		translator.recordSkippedLowerings()
-		return translator.translation, nil
+		return translator.finalize(), nil
 	}
 
 	if err := walk.Cypher(optimizedPlan.Query, translator); err != nil {
@@ -843,7 +848,7 @@ func Translate(ctx context.Context, cypherQuery *cypher.RegularQuery, kindMapper
 	}
 
 	translator.recordSkippedLowerings()
-	return translator.translation, nil
+	return translator.finalize(), nil
 }
 
 func decodeCypherStringLiteral(raw string) (string, error) {

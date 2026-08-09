@@ -24,6 +24,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/specterops/dawgs/drivers/pg"
 )
 
 const (
@@ -34,11 +36,12 @@ const (
 
 // Report holds all benchmark results and metadata.
 type Report struct {
-	Driver     string   `json:"driver"`
-	GitRef     string   `json:"git_ref"`
-	Date       string   `json:"date"`
-	Iterations int      `json:"iterations"`
-	Results    []Result `json:"results"`
+	Driver     string           `json:"driver"`
+	GitRef     string           `json:"git_ref"`
+	Date       string           `json:"date"`
+	Iterations int              `json:"iterations"`
+	Layout     *pg.LayoutHealth `json:"layout,omitempty"`
+	Results    []Result         `json:"results"`
 }
 
 func writeReport(w io.Writer, r Report, format string) error {

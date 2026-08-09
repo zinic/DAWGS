@@ -34,6 +34,7 @@ type backendCapture struct {
 	db          graph.Database
 	pgDriver    *pg.Driver
 	pgGraphID   int32
+	pgHealth    pg.LayoutHealth
 	neo4jDriver neo4jcore.Driver
 	neo4jDBName string
 }
@@ -185,6 +186,19 @@ func openBackend(ctx context.Context, suite corpus, spec captureSpec) (*backendC
 		}
 		return nil, fmt.Errorf("open %s database: %w", spec.DriverName, err)
 	}
+	var postgresHealth pg.LayoutHealth
+	if spec.DriverName == pg.DriverName {
+		pgDriver, ok := db.(*pg.Driver)
+		if !ok {
+			_ = db.Close(ctx)
+			return nil, fmt.Errorf("expected *pg.Driver, got %T", db)
+		}
+		postgresHealth, err = pgDriver.Readiness(ctx)
+		if err != nil {
+			_ = db.Close(ctx)
+			return nil, fmt.Errorf("PostgreSQL readiness: %w", err)
+		}
+	}
 
 	schema := graph.Schema{
 		Graphs: []graph.Graph{{
@@ -218,6 +232,7 @@ func openBackend(ctx context.Context, suite corpus, spec captureSpec) (*backendC
 		}
 		backend.pgDriver = pgDriver
 		backend.pgGraphID = defaultGraph.ID
+		backend.pgHealth = postgresHealth
 
 	case neo4j.DriverName:
 		neo4jDriver, databaseName, err := openNeo4jPlanDriver(spec.Connection)
@@ -267,10 +282,18 @@ func (s *backendCapture) capturePostgres(ctx context.Context, cypherQuery string
 		record.Error = err.Error()
 		return
 	}
+	if err := frontend.RequireReadOnly(regularQuery); err != nil {
+		record.Error = err.Error()
+		return
+	}
 
 	translation, err := translate.Translate(ctx, regularQuery, s.pgDriver.KindMapper(), params, s.pgGraphID)
 	if err != nil {
 		record.Error = err.Error()
+		return
+	}
+	if translation.HasMutations {
+		record.Error = frontend.ErrMutationNotAllowed.Error()
 		return
 	}
 
@@ -280,9 +303,28 @@ func (s *backendCapture) capturePostgres(ctx context.Context, cypherQuery string
 		return
 	}
 
-	var plan []string
+	var structured pg.StructuredExplain
 	if err := s.db.ReadTransaction(ctx, func(tx graph.Transaction) error {
-		result := tx.Raw("EXPLAIN "+sqlQuery, translation.Parameters)
+		inventoryResult := tx.Raw(`select graph_id,kind_id from public.dawgs_edge_kind_leaf
+where lifecycle_state='active' order by graph_id,kind_id`, nil)
+		var inventory []pg.LeafReference
+		for inventoryResult.Next() {
+			values := inventoryResult.Values()
+			if len(values) != 2 {
+				continue
+			}
+			graphID, graphOK := planInteger(values[0])
+			kindID, kindOK := planInteger(values[1])
+			if graphOK && kindOK {
+				inventory = append(inventory, pg.LeafReference{GraphID: int32(graphID), KindID: int16(kindID)})
+			}
+		}
+		if err := inventoryResult.Error(); err != nil {
+			inventoryResult.Close()
+			return err
+		}
+		inventoryResult.Close()
+		result := tx.Raw("EXPLAIN (ANALYZE, BUFFERS, TIMING OFF, FORMAT JSON) "+sqlQuery, translation.Parameters)
 		defer result.Close()
 
 		for result.Next() {
@@ -290,24 +332,58 @@ func (s *backendCapture) capturePostgres(ctx context.Context, cypherQuery string
 			if len(values) == 0 {
 				continue
 			}
-			plan = append(plan, fmt.Sprint(values[0]))
+			var err error
+			structured, err = pg.DecodeStructuredExplain(values[0], inventory)
+			return err
 		}
-
-		return result.Error()
+		if err := result.Error(); err != nil {
+			return err
+		}
+		if len(structured.Plan) == 0 {
+			return fmt.Errorf("PostgreSQL EXPLAIN returned no JSON plan")
+		}
+		return nil
 	}); err != nil {
 		record.Error = err.Error()
 	}
 
 	record.SQL = sqlQuery
-	record.PGPlan = plan
-	record.PGOperators = postgresOperators(plan)
+	record.PGPlan = []string{string(structured.Plan)}
+	record.PGPlanJSON = structured.Plan
+	record.PGLeaves = &structured.Leaves
+	record.PGLayout = &s.pgHealth
+	record.PGOperators = append([]string(nil), structured.Operators...)
 	record.PlannedLowerings = loweringNames(translation.Optimization.PlannedLowerings)
 	record.AppliedLowerings = loweringNames(translation.Optimization.Lowerings)
 	record.SkippedLowerings = append([]translate.SkippedLowering(nil), translation.Optimization.SkippedLowerings...)
 	record.Optimization = &translation.Optimization
 }
 
+func planInteger(value any) (int64, bool) {
+	switch typed := value.(type) {
+	case int16:
+		return int64(typed), true
+	case int32:
+		return int64(typed), true
+	case int64:
+		return typed, true
+	case int:
+		return int64(typed), true
+	default:
+		return 0, false
+	}
+}
+
 func (s *backendCapture) captureNeo4j(cypherQuery string, params map[string]any, record *PlanRecord) {
+	regularQuery, err := frontend.ParseCypher(frontend.NewContext(), cypherQuery)
+	if err != nil {
+		record.Error = err.Error()
+		return
+	}
+	if err := frontend.RequireReadOnly(regularQuery); err != nil {
+		record.Error = err.Error()
+		return
+	}
 	session := s.neo4jDriver.NewSession(neo4jcore.SessionConfig{
 		AccessMode:   neo4jcore.AccessModeWrite,
 		DatabaseName: s.neo4jDBName,

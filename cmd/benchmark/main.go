@@ -68,8 +68,9 @@ func main() {
 	}
 
 	var (
-		ctx = context.Background()
-		cfg = dawgs.Config{
+		ctx            = context.Background()
+		postgresHealth *pg.LayoutHealth
+		cfg            = dawgs.Config{
 			GraphQueryMemoryLimit: size.Gibibyte,
 			ConnectionString:      conn,
 		}
@@ -92,6 +93,17 @@ func main() {
 		fatal("failed to open database: %v", err)
 	}
 	defer db.Close(ctx)
+	if *driver == pg.DriverName {
+		pgDB, ok := db.(*pg.Driver)
+		if !ok {
+			fatal("expected *pg.Driver, got %T", db)
+		}
+		health, err := pgDB.Readiness(ctx)
+		if err != nil {
+			fatal("PostgreSQL readiness failed: %v", err)
+		}
+		postgresHealth = &health
+	}
 
 	// Build dataset list
 	var datasets []string
@@ -138,6 +150,7 @@ func main() {
 		GitRef:     gitRef(),
 		Date:       time.Now().Format("2006-01-02"),
 		Iterations: *iterations,
+		Layout:     postgresHealth,
 	}
 
 	for _, ds := range datasets {

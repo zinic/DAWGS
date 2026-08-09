@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "installation_id": "integration-v1",
+  "source_configuration": {
+    "artifact": "drivers/pg/migrate/testdata/v1_schema.sql",
+    "sha256": "8bea76272e005639d34643f8311599440e1eccc8c3152ca4da1e6dda42c87e0f"
+  },
+  "owner_attestation": {
+    "owner_id": "integration-test",
+    "attested_at": "2026-01-01T00:00:00Z",
+    "statement_version": 1
+  },
+  "graphs": [
+    {
+      "name": "migration_test",
+      "edge_kinds": ["MIGRATES_TO"]
+    }
+  ],
+  "excluded_unmaterialized_graphs": []
+}

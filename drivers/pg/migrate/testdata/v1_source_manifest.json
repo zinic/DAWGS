@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "source_revision": "bd64d910ef1bfe01b886fa584796275e5c533c8e",
+  "captured_at": "2026-08-07T00:00:00Z",
+  "artifacts": [
+    {
+      "path": "drivers/pg/migrate/testdata/v1_schema.sql",
+      "sha256": "8bea76272e005639d34643f8311599440e1eccc8c3152ca4da1e6dda42c87e0f"
+    },
+    {
+      "path": "drivers/pg/migrate/testdata/v1_schema_down.sql",
+      "sha256": "333194c7c33a24ae134f01186d2f6d9ed923a76bbfb155b51c98dc1ebb14b2a9"
+    },
+    {
+      "path": "drivers/pg/migrate/testdata/v1_client_go.mod",
+      "sha256": "9881bcf92731118d7cddff00d250a633b2d2e64af06ec9c0ef6445550a21867a"
+    },
+    {
+      "path": "drivers/pg/migrate/testdata/v1_export_client.go.txt",
+      "sha256": "82704da608dbe1a3b978af3414c6d6eabdc8cdd36c25774a6b53e954ac234d93"
+    }
+  ]
+}

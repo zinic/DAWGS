@@ -2,10 +2,10 @@
 -- kind already exists then the kind's assigned ID is returned.
 with
   existing as (
-    select id from kind where kind.name = @name
+    select id from public.kind where kind.name = @name
   ),
   inserted as (
-    insert into kind (name) values (@name) on conflict (name) do nothing returning id
+    insert into public.kind (name) values (@name) on conflict (name) do nothing returning id
   )
 select * from existing
 union

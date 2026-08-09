@@ -117,6 +117,10 @@ func (s *Translator) translateUpdates() error {
 
 func (s *Translator) buildUpdates() error {
 	for _, identifierMutation := range s.query.CurrentPart().mutations.Updates.Values() {
+		if identifierMutation.UpdateBinding.DataType == pgsql.EdgeComposite &&
+			(len(identifierMutation.KindAssignments) > 0 || len(identifierMutation.KindRemovals) > 0) {
+			return fmt.Errorf("relationship kind mutation is unsupported; delete and recreate the relationship")
+		}
 		sqlUpdate := pgsql.Update{
 			From: []pgsql.FromClause{{
 				Source: pgsql.TableReference{

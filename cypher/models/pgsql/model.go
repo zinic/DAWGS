@@ -405,7 +405,9 @@ func (s *Parenthetical) AsExpression() Expression {
 }
 
 type EdgeArrayFromPathIDs struct {
-	PathIDs Expression
+	PathIDs    Expression
+	EdgeTarget CompoundIdentifier
+	KindIDs    []int16
 }
 
 func (s *EdgeArrayFromPathIDs) NodeType() string {

@@ -2,6 +2,7 @@ package translate
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/specterops/dawgs/cypher/models/cypher"
 	"github.com/specterops/dawgs/cypher/models/walk"
@@ -238,13 +239,46 @@ func pathEdgeArrayExpression(scope *Scope, edge *BoundIdentifier) pgsql.Expressi
 			},
 			CastType: pgsql.Int8Array,
 		},
+		KindIDs: append([]int16(nil), edge.KnownKindIDs...),
 	}
 }
 
 func expansionPathEdgeArrayExpression(scope *Scope, expansionPath *BoundIdentifier) (pgsql.Expression, error) {
 	return &pgsql.EdgeArrayFromPathIDs{
 		PathIDs: pathBindingReference(scope, expansionPath),
+		KindIDs: knownKindIDsForHydration(expansionPath),
 	}, nil
+}
+
+func knownKindIDsForHydration(binding *BoundIdentifier) []int16 {
+	if len(binding.KnownKindIDs) > 0 {
+		return append([]int16(nil), binding.KnownKindIDs...)
+	}
+
+	kindSet := map[int16]struct{}{}
+	foundEdge := false
+	for _, dependency := range binding.Dependencies {
+		switch dependency.DataType {
+		case pgsql.EdgeComposite, pgsql.ExpansionEdge, pgsql.ExpansionPath, pgsql.PathEdge:
+			foundEdge = true
+			dependencyKinds := knownKindIDsForHydration(dependency)
+			if len(dependencyKinds) == 0 {
+				return nil
+			}
+			for _, kindID := range dependencyKinds {
+				kindSet[kindID] = struct{}{}
+			}
+		}
+	}
+	if !foundEdge {
+		return nil
+	}
+	kindIDs := make([]int16, 0, len(kindSet))
+	for kindID := range kindSet {
+		kindIDs = append(kindIDs, kindID)
+	}
+	slices.Sort(kindIDs)
+	return kindIDs
 }
 
 func optionalOr(leftOperand, rightOperand pgsql.Expression) pgsql.Expression {
@@ -490,6 +524,7 @@ func buildProjectionForExpansionEdge(alias pgsql.Identifier, projected *BoundIde
 					scope.CurrentFrame().Binding.Identifier,
 					pgsql.ColumnPath,
 				},
+				KindIDs: knownKindIDsForHydration(projected),
 			},
 			Alias: pgsql.AsOptionalIdentifier(alias),
 		},

@@ -59,11 +59,12 @@ type ExpansionBuilder struct {
 	queryParameters map[string]any
 	traversalStep   *TraversalStep
 	model           *Expansion
+	graphID         int32
 	unwindClauses   []UnwindClause
 	unwindSources   []pgsql.FromClause
 }
 
-func NewExpansionBuilder(queryParameters map[string]any, traversalStep *TraversalStep) (*ExpansionBuilder, error) {
+func NewExpansionBuilder(queryParameters map[string]any, traversalStep *TraversalStep, graphID int32) (*ExpansionBuilder, error) {
 	if traversalStep.Expansion == nil {
 		return nil, errors.New("traversal step must have expansion set")
 	}
@@ -72,6 +73,7 @@ func NewExpansionBuilder(queryParameters map[string]any, traversalStep *Traversa
 		queryParameters: queryParameters,
 		traversalStep:   traversalStep,
 		model:           traversalStep.Expansion,
+		graphID:         graphID,
 	}, nil
 }
 
@@ -1933,13 +1935,13 @@ func (s *ExpansionBuilder) boundEndpointFilterParameters() ([]pgsql.Expression, 
 	)
 
 	if hasPairFilter {
-		if formattedFilter, err := format.Statement(pairFilterStatement, format.NewOutputBuilder().WithMaterializedParameters(s.queryParameters)); err != nil {
+		if formattedFilter, err := format.Statement(pairFilterStatement, format.NewOutputBuilder().WithGraphScope(s.graphID).WithMaterializedParameters(s.queryParameters)); err != nil {
 			return nil, err
 		} else {
 			pairFilter = formattedFilter
 		}
 	} else if hasRootFilter {
-		if formattedFilter, err := format.Statement(rootFilterStatement, format.NewOutputBuilder().WithMaterializedParameters(s.queryParameters)); err != nil {
+		if formattedFilter, err := format.Statement(rootFilterStatement, format.NewOutputBuilder().WithGraphScope(s.graphID).WithMaterializedParameters(s.queryParameters)); err != nil {
 			return nil, err
 		} else {
 			rootFilter = formattedFilter
@@ -1947,7 +1949,7 @@ func (s *ExpansionBuilder) boundEndpointFilterParameters() ([]pgsql.Expression, 
 	}
 
 	if !hasPairFilter && hasTerminalFilter {
-		if formattedFilter, err := format.Statement(terminalFilterStatement, format.NewOutputBuilder().WithMaterializedParameters(s.queryParameters)); err != nil {
+		if formattedFilter, err := format.Statement(terminalFilterStatement, format.NewOutputBuilder().WithGraphScope(s.graphID).WithMaterializedParameters(s.queryParameters)); err != nil {
 			return nil, err
 		} else {
 			terminalFilter = formattedFilter
@@ -1972,7 +1974,7 @@ func (s *ExpansionBuilder) shortestPathsParameters(expansionModel *Expansion, fo
 		formatFragment    = func(query pgsql.SetExpression) (string, error) {
 			return format.Statement(
 				nextFrontInsert(query),
-				format.NewOutputBuilder().WithMaterializedParameters(s.queryParameters))
+				format.NewOutputBuilder().WithGraphScope(s.graphID).WithMaterializedParameters(s.queryParameters))
 		}
 	)
 
@@ -2016,7 +2018,7 @@ func (s *ExpansionBuilder) bidirectionalAllShortestPathsParameters(expansionMode
 		formatFragment    = func(query pgsql.SetExpression) (string, error) {
 			return format.Statement(
 				nextFrontInsert(query),
-				format.NewOutputBuilder().WithMaterializedParameters(s.queryParameters))
+				format.NewOutputBuilder().WithGraphScope(s.graphID).WithMaterializedParameters(s.queryParameters))
 		}
 	)
 

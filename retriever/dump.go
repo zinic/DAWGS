@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/specterops/dawgs/drivers/pg"
 	"github.com/specterops/dawgs/graph"
 )
 
@@ -84,7 +85,24 @@ func Dump(ctx context.Context, db graph.Database, driverName string, targets []G
 		activeScrubber = nextScrubber
 		scrubInfo = activeScrubber.metadata()
 	}
-	checkpointIdentity, err := newDumpCheckpointIdentity(driverName, targets, options, activeScrubber)
+	source := SourceMetadata{GraphCount: len(targets)}
+	if driverName == pg.DriverName {
+		provider, ok := db.(pg.LayoutHealthProvider)
+		if !ok {
+			return DumpResult{}, fmt.Errorf("PostgreSQL retriever database %T does not expose layout health", db)
+		}
+		health, err := provider.LayoutHealth(ctx)
+		if err != nil {
+			return DumpResult{}, fmt.Errorf("capture PostgreSQL source metadata: %w", err)
+		}
+		digest, err := postgresMetadataSHA256(health)
+		if err != nil {
+			return DumpResult{}, err
+		}
+		source.Postgres = &health
+		source.PostgresSHA256 = digest
+	}
+	checkpointIdentity, err := newDumpCheckpointIdentity(driverName, targets, options, activeScrubber, source)
 	if err != nil {
 		return DumpResult{}, err
 	}
@@ -109,6 +127,7 @@ func Dump(ctx context.Context, db graph.Database, driverName string, targets []G
 			return DumpResult{}, err
 		}
 		nextManifest := newManifest(driverName, options.Compression, options.ZstdLevel, scrubInfo, len(targets))
+		nextManifest.Source = source
 		nextMetrics := newMetricsManifest(len(targets))
 		nextManifest.Metrics = &nextMetrics
 		checkpoint = dumpCheckpoint{

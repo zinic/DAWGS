@@ -17,7 +17,11 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -30,6 +34,7 @@ type Measurement struct {
 	RowCount          int64
 	DistinctRowCount  *int64
 	DuplicateRowCount *int64
+	LogicalDigest     string
 }
 
 // Scenario defines a single benchmark query to run against a loaded dataset.
@@ -81,11 +86,17 @@ func cypherQuery(cypher string) func(tx graph.Transaction) (Measurement, error) 
 		defer result.Close()
 
 		var rowCount int64
+		var rowDigests []string
 		for result.Next() {
 			rowCount++
+			digest, err := digestResultValues(result.Values())
+			if err != nil {
+				return Measurement{}, err
+			}
+			rowDigests = append(rowDigests, digest)
 		}
 
-		return Measurement{RowCount: rowCount}, result.Error()
+		return Measurement{RowCount: rowCount, LogicalDigest: digestRows(rowDigests)}, result.Error()
 	}
 }
 
@@ -96,7 +107,7 @@ func countQuery(query func(tx graph.Transaction) (int64, error)) func(tx graph.T
 			return Measurement{}, err
 		}
 
-		return Measurement{RowCount: rowCount}, nil
+		return Measurement{RowCount: rowCount, LogicalDigest: digestRows([]string{fmt.Sprintf("count:%d", rowCount)})}, nil
 	}
 }
 
@@ -131,12 +142,18 @@ func cypherPathQuery(cypher string, pathColumns int) func(tx graph.Transaction) 
 		defer result.Close()
 
 		var (
-			rowCount int64
-			seen     = map[string]struct{}{}
+			rowCount   int64
+			seen       = map[string]struct{}{}
+			rowDigests []string
 		)
 
 		for result.Next() {
 			rowCount++
+			digest, err := digestResultValues(result.Values())
+			if err != nil {
+				return Measurement{}, err
+			}
+			rowDigests = append(rowDigests, digest)
 
 			var (
 				values  = make([]graph.Path, pathColumns)
@@ -167,8 +184,29 @@ func cypherPathQuery(cypher string, pathColumns int) func(tx graph.Transaction) 
 			RowCount:          rowCount,
 			DistinctRowCount:  &distinctRowCount,
 			DuplicateRowCount: &duplicateRowCount,
+			LogicalDigest:     digestRows(rowDigests),
 		}, nil
 	}
+}
+
+func digestResultValues(values []any) (string, error) {
+	encoded, err := json.Marshal(values)
+	if err != nil {
+		return "", fmt.Errorf("encode benchmark result values: %w", err)
+	}
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+func digestRows(rowDigests []string) string {
+	sorted := append([]string(nil), rowDigests...)
+	sort.Strings(sorted)
+	digest := sha256.New()
+	for _, rowDigest := range sorted {
+		_, _ = digest.Write([]byte(rowDigest))
+		_, _ = digest.Write([]byte{'\n'})
+	}
+	return hex.EncodeToString(digest.Sum(nil))
 }
 
 func pathRowKey(paths []graph.Path) string {

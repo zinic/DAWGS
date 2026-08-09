@@ -17,12 +17,24 @@
 package main
 
 import (
+	"context"
 	"testing"
 
 	"github.com/specterops/dawgs/graph"
 	"github.com/specterops/dawgs/opengraph"
 	"github.com/stretchr/testify/require"
 )
+
+func TestDiagnosticRunnersRejectMutationsBeforeDatabaseAccess(t *testing.T) {
+	testCase := ScaleCase{Name: "mutation", Dataset: "fixture", Category: "safety", Cypher: `create (n:Thing) return n`}
+	postgresRecord := (&postgresSQLRunner{}).runCase(context.Background(), 1, testCase, nil)
+	require.Equal(t, StatusError, postgresRecord.Status)
+	require.Contains(t, postgresRecord.Error, "mutation is not allowed")
+
+	neo4jRecord := (&neo4jRunner{}).runCase(context.Background(), 1, testCase, nil)
+	require.Equal(t, StatusError, neo4jRecord.Status)
+	require.Contains(t, neo4jRecord.Error, "mutation is not allowed")
+}
 
 func TestResolveCaseParams(t *testing.T) {
 	params, err := resolveCaseParams(ScaleCase{

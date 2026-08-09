@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"path"
 	"strings"
+
+	"github.com/specterops/dawgs/drivers/pg/internal/schema"
 )
 
 var (
@@ -43,8 +45,8 @@ func loadSQL(name string) string {
 }
 
 var (
-	sqlSchemaUp           = loadSQL("schema_up.sql")
-	sqlSchemaDown         = loadSQL("schema_down.sql")
+	sqlSchemaUp           = schema.Up()
+	sqlSchemaDown         = schema.Down()
 	sqlSelectTableIndexes = loadSQL("select_table_indexes.sql")
 	sqlSelectKindID       = loadSQL("select_table_indexes.sql")
 	sqlSelectGraphs       = loadSQL("select_graphs.sql")

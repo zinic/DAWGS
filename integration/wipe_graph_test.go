@@ -134,9 +134,12 @@ func countNodes(t *testing.T, ctx context.Context, db graph.Database) int64 {
 	var count int64
 
 	require.NoError(t, db.ReadTransaction(ctx, func(tx graph.Transaction) error {
-		result, err := tx.Nodes().Count()
-		count = result
-		return err
+		result := tx.Raw("select count(*) from public.node", nil)
+		defer result.Close()
+		if !result.Next() {
+			return result.Error()
+		}
+		return result.Scan(&count)
 	}))
 
 	return count
@@ -148,9 +151,12 @@ func countEdges(t *testing.T, ctx context.Context, db graph.Database) int64 {
 	var count int64
 
 	require.NoError(t, db.ReadTransaction(ctx, func(tx graph.Transaction) error {
-		result, err := tx.Relationships().Count()
-		count = result
-		return err
+		result := tx.Raw("select count(*) from public.edge", nil)
+		defer result.Close()
+		if !result.Next() {
+			return result.Error()
+		}
+		return result.Scan(&count)
 	}))
 
 	return count

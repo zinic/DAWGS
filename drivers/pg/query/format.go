@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/specterops/dawgs/drivers/pg/model"
 	"github.com/specterops/dawgs/graph"
 )
@@ -35,33 +36,42 @@ func join(values ...string) string {
 	return strings.Join(values, "")
 }
 
+func managedRelation(name string) string {
+	name = strings.TrimPrefix(name, "public.")
+	return pgx.Identifier{"public", name}.Sanitize()
+}
+
+func sqlLiteral(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
+}
+
 func formatDropPropertyIndex(indexName string) string {
-	return join("drop index if exists ", indexName, ";")
+	return join("drop index if exists ", managedRelation(indexName), ";")
 }
 
 func formatDropPropertyConstraint(constraintName string) string {
-	return join("drop index if exists ", constraintName, ";")
+	return join("drop index if exists ", managedRelation(constraintName), ";")
 }
 
 func formatCreatePropertyConstraint(constraintName, tableName, fieldName string, indexType graph.IndexType) string {
 	pgIndexType := postgresIndexType(indexType)
 
-	return join("create unique index ", constraintName, " on ", tableName, " using ",
-		pgIndexType, " ((", tableName, ".", pgPropertiesColumn, " ->> '", fieldName, "'));")
+	return join("create unique index ", managedRelation(constraintName), " on ", managedRelation(tableName), " using ",
+		pgIndexType, " ((", pgPropertiesColumn, " ->> ", sqlLiteral(fieldName), "));")
 }
 
 func formatCreatePropertyIndex(indexName, tableName, fieldName string, indexType graph.IndexType) string {
 	var (
 		pgIndexType  = postgresIndexType(indexType)
-		queryPartial = join("create index ", indexName, " on ", tableName, " using ",
-			pgIndexType, " ((", tableName, ".", pgPropertiesColumn, " ->> '", fieldName)
+		queryPartial = join("create index ", managedRelation(indexName), " on ", managedRelation(tableName), " using ",
+			pgIndexType, " ((", pgPropertiesColumn, " ->> ", sqlLiteral(fieldName))
 	)
 
 	if indexType == graph.TextSearchIndex {
 		// GIN text search requires the column to be typed and to contain the tri-gram operation extension
-		return join(queryPartial, "'::text) gin_trgm_ops);")
+		return join(queryPartial, "::text) gin_trgm_ops);")
 	} else {
-		return join(queryPartial, "'));")
+		return join(queryPartial, "));")
 	}
 }
 
@@ -69,14 +79,26 @@ func formatCreatePartitionTable(name, parent string, graphID int32) string {
 	builder := strings.Builder{}
 
 	builder.WriteString("create table ")
-	builder.WriteString(name)
+	builder.WriteString(managedRelation(name))
 	builder.WriteString(" partition of ")
-	builder.WriteString(parent)
+	builder.WriteString(managedRelation(parent))
 	builder.WriteString(" for values in (")
 	builder.WriteString(strconv.FormatInt(int64(graphID), 10))
 	builder.WriteString(")")
 
 	return builder.String()
+}
+
+func formatCreateEdgeParentTable(name, parent string, graphID int32) string {
+	return formatCreatePartitionTable(name, parent, graphID) + " partition by list (kind_id)"
+}
+
+func formatCreateEdgeKindPartitionTable(name, parent string, kindID int16) string {
+	return join(
+		"create table if not exists ", managedRelation(name),
+		" partition of ", managedRelation(parent),
+		" for values in (", strconv.FormatInt(int64(kindID), 10), ")",
+	)
 }
 
 func formatConflictMatcher(propertyNames []string, defaultOnConflict string) string {
@@ -89,9 +111,9 @@ func formatConflictMatcher(propertyNames []string, defaultOnConflict string) str
 				builder.WriteString(", ")
 			}
 
-			builder.WriteString("(properties->>'")
-			builder.WriteString(propertyName)
-			builder.WriteString("')")
+			builder.WriteString("(properties->>")
+			builder.WriteString(sqlLiteral(propertyName))
+			builder.WriteString(")")
 		}
 	} else {
 		builder.WriteString(defaultOnConflict)
@@ -103,17 +125,17 @@ func formatConflictMatcher(propertyNames []string, defaultOnConflict string) str
 
 func FormatNodesUpdate(graphTarget model.Graph) string {
 	return join(
-		"update ", graphTarget.Partitions.Node.Name, " as n ",
+		"update ", managedRelation(graphTarget.Partitions.Node.Name), " as n ",
 		"set ",
 		" kind_ids = uniq(sort(kind_ids - u.deleted_kinds || u.added_kinds)), ",
 		" properties = n.properties - u.deleted_properties || u.properties ",
 		"from ",
 		" (select ",
-		"  unnest($1::text[])::int8 as id, ",
-		"  unnest($2::text[])::int2[] as added_kinds, ",
-		"  unnest($3::text[])::int2[] as deleted_kinds, ",
-		"  unnest($4::jsonb[]) as properties, ",
-		"  unnest($5::text[])::text[] as deleted_properties) as u ",
+		"  pg_catalog.unnest($1::text[])::int8 as id, ",
+		"  pg_catalog.unnest($2::text[])::int2[] as added_kinds, ",
+		"  pg_catalog.unnest($3::text[])::int2[] as deleted_kinds, ",
+		"  pg_catalog.unnest($4::jsonb[]) as properties, ",
+		"  pg_catalog.unnest($5::text[])::text[] as deleted_properties) as u ",
 		"where n.id = u.id; ",
 	)
 }
@@ -126,7 +148,7 @@ var NodeUpdateStagingColumns = []string{"id", "added_kinds", "deleted_kinds", "p
 
 func FormatCreateNodeUpdateStagingTable(stagingTable string) string {
 	return join(
-		"create temp table if not exists ", stagingTable, " (",
+		"create temp table if not exists ", pgx.Identifier{stagingTable}.Sanitize(), " (",
 		"id bigint, ",
 		"added_kinds text, ",
 		"deleted_kinds text, ",
@@ -138,8 +160,8 @@ func FormatCreateNodeUpdateStagingTable(stagingTable string) string {
 
 func FormatMergeNodeLargeUpdate(graphTarget model.Graph, stagingTable string) string {
 	return join(
-		"merge into ", graphTarget.Partitions.Node.Name, " as n ",
-		"using ", stagingTable, " as u on n.id = u.id ",
+		"merge into ", managedRelation(graphTarget.Partitions.Node.Name), " as n ",
+		"using ", pgx.Identifier{stagingTable}.Sanitize(), " as u on n.id = u.id ",
 		"when matched then update set ",
 		"kind_ids = uniq(sort(n.kind_ids - u.deleted_kinds::int2[] || u.added_kinds::int2[])), ",
 		"properties = n.properties - u.deleted_props::text[] || u.properties::jsonb;",
@@ -148,9 +170,9 @@ func FormatMergeNodeLargeUpdate(graphTarget model.Graph, stagingTable string) st
 
 func FormatNodeUpsert(graphTarget model.Graph, identityProperties []string) string {
 	return join(
-		"insert into ", graphTarget.Partitions.Node.Name, " as n ",
+		"insert into ", managedRelation(graphTarget.Partitions.Node.Name), " as n ",
 		"(graph_id, kind_ids, properties) ",
-		"select $1, unnest($2::text[])::int2[], unnest($3::jsonb[]) ",
+		"select $1, pg_catalog.unnest($2::text[])::int2[], pg_catalog.unnest($3::jsonb[]) ",
 		formatConflictMatcher(identityProperties, "id, graph_id"),
 		"do update set properties = n.properties || excluded.properties, kind_ids = uniq(sort(n.kind_ids || excluded.kind_ids)) ",
 		"returning id;",
@@ -158,9 +180,24 @@ func FormatNodeUpsert(graphTarget model.Graph, identityProperties []string) stri
 }
 
 func FormatRelationshipPartitionUpsert(graphTarget model.Graph, identityProperties []string) string {
-	return join("insert into ", graphTarget.Partitions.Edge.Name, " as e ",
+	if len(identityProperties) == 1 {
+		return join("with input(start_id,end_id,kind_id,properties) as (",
+			"select pg_catalog.unnest($2::int8[]),pg_catalog.unnest($3::int8[]),pg_catalog.unnest($4::int2[]),pg_catalog.unnest($5::jsonb[])), ",
+			"updated as (update ", managedRelation(graphTarget.Partitions.Edge.Name), " as e ",
+			"set properties=e.properties||input.properties from input ",
+			"where e.graph_id=$1 and e.properties ->> $6=input.properties ->> $6 ",
+			"returning input.start_id,input.end_id,input.kind_id,input.properties) ",
+			"insert into ", managedRelation(graphTarget.Partitions.Edge.Name), " as e ",
+			"(graph_id,start_id,end_id,kind_id,properties) ",
+			"select $1,input.start_id,input.end_id,input.kind_id,input.properties from input ",
+			"where not exists (select 1 from updated where updated.start_id=input.start_id ",
+			"and updated.end_id=input.end_id and updated.kind_id=input.kind_id) ",
+			"on conflict (start_id,end_id,kind_id,graph_id) do update ",
+			"set properties=e.properties||excluded.properties;")
+	}
+	return join("insert into ", managedRelation(graphTarget.Partitions.Edge.Name), " as e ",
 		"(graph_id, start_id, end_id, kind_id, properties) ",
-		"select $1, unnest($2::int8[]), unnest($3::int8[]), unnest($4::int2[]), unnest($5::jsonb[]) ",
+		"select $1, pg_catalog.unnest($2::int8[]), pg_catalog.unnest($3::int8[]), pg_catalog.unnest($4::int2[]), pg_catalog.unnest($5::jsonb[]) ",
 		formatConflictMatcher(identityProperties, "start_id, end_id, kind_id, graph_id"),
 		"do update set properties = e.properties || excluded.properties;",
 	)
@@ -277,6 +314,9 @@ func NewRelationshipUpdateBatch() *RelationshipUpdateBatch {
 }
 
 func (s *RelationshipUpdateBatch) Add(update graph.RelationshipUpdate) error {
+	if len(update.IdentityProperties) > 1 {
+		return fmt.Errorf("relationship property identity supports at most one field")
+	}
 	if len(s.IdentityProperties) > 0 && len(update.IdentityProperties) != len(s.IdentityProperties) {
 		return fmt.Errorf("relationship update mixes identity properties with pre-existing updates")
 	}

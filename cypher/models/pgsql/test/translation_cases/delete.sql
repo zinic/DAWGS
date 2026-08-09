@@ -15,11 +15,10 @@
 -- SPDX-License-Identifier: Apache-2.0
 
 -- case: match (s:NodeKind1) detach delete s
-with s0 as (select (n0.id, n0.kind_ids, n0.properties)::nodecomposite as n0 from node n0 where n0.kind_ids operator (pg_catalog.@>) array [1]::int2[]), s1 as (delete from node n1 using s0 where (s0.n0).id = n1.id) select 1;
+with s0 as (select (n0.id, n0.kind_ids, n0.properties)::nodecomposite as n0 from public.node_0 n0 where n0.kind_ids operator (pg_catalog.@>) array [1]::int2[]), s1 as (delete from public.node_0 n1 using s0 where (s0.n0).id = n1.id) select 1;
 
 -- case: match ()-[r:EdgeKind1]->() delete r
-with s0 as (select (e0.id, e0.start_id, e0.end_id, e0.kind_id, e0.properties)::edgecomposite as e0 from edge e0 join node n0 on n0.id = e0.start_id join node n1 on n1.id = e0.end_id where e0.kind_id = any (array [3]::int2[])), s1 as (delete from edge e1 using s0 where (s0.e0).id = e1.id) select 1;
+with s0 as (select (e0.id, e0.start_id, e0.end_id, e0.kind_id, e0.properties)::edgecomposite as e0 from public.edge_0 e0 join public.node_0 n0 on n0.id = e0.start_id join public.node_0 n1 on n1.id = e0.end_id where e0.kind_id = any (array [3]::int2[])), s1 as (delete from public.edge_0 e1 using s0 where (s0.e0).id = e1.id) select 1;
 
 -- case: match ()-[]->()-[r:EdgeKind1]->() delete r
-with s0 as (select e0.id as e0, (n1.id, n1.kind_ids, n1.properties)::nodecomposite as n1 from edge e0 join node n0 on n0.id = e0.start_id join node n1 on n1.id = e0.end_id), s1 as (select s0.e0 as e0, (e1.id, e1.start_id, e1.end_id, e1.kind_id, e1.properties)::edgecomposite as e1, s0.n1 as n1 from s0 join edge e1 on (s0.n1).id = e1.start_id join node n2 on n2.id = e1.end_id where e1.kind_id = any (array [3]::int2[]) and e1.id != s0.e0), s2 as (delete from edge e2 using s1 where (s1.e1).id = e2.id) select 1;
-
+with s0 as (select e0.id as e0, (n1.id, n1.kind_ids, n1.properties)::nodecomposite as n1 from public.edge_0 e0 join public.node_0 n0 on n0.id = e0.start_id join public.node_0 n1 on n1.id = e0.end_id), s1 as (select s0.e0 as e0, (e1.id, e1.start_id, e1.end_id, e1.kind_id, e1.properties)::edgecomposite as e1, s0.n1 as n1 from s0 join public.edge_0 e1 on (s0.n1).id = e1.start_id join public.node_0 n2 on n2.id = e1.end_id where e1.kind_id = any (array [3]::int2[]) and e1.id != s0.e0), s2 as (delete from public.edge_0 e2 using s1 where (s1.e1).id = e2.id) select 1;

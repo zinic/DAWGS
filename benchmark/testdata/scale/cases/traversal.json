@@ -83,6 +83,18 @@
       "tags": ["path-materialization"]
     },
     {
+      "name": "typed_variable_length_path_hydration_from_bound_id",
+      "dataset": "base",
+      "category": "typed_path_hydration",
+      "cypher": "MATCH p = (s)-[:EdgeKind1|EdgeKind2*1..]->(e) WHERE id(s) = $start_id RETURN p",
+      "node_params": {"start_id": "n1"},
+      "expected": {"row_count": 2, "result_kind": "path_set"},
+      "observes": {"paths": true, "nodes": true, "relationships": true, "properties": true},
+      "shape": {"root_predicate": "bound_id", "edge_kinds": ["EdgeKind1", "EdgeKind2"], "min_depth": 1, "path_materialization_required": true},
+      "candidate_modes": ["postgres_sql", "neo4j"],
+      "tags": ["typed-expansion", "typed-hydration", "partition-pruning"]
+    },
+    {
       "name": "adcs_p1_endpoint_ids",
       "dataset": "adcs_fanout",
       "category": "bloodhound_search",
@@ -140,4 +152,3 @@
     }
   ]
 }
-

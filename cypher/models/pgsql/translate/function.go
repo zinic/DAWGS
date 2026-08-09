@@ -629,7 +629,7 @@ func (s *Translator) translateRelationshipEndpointFunction(function pgsql.Identi
 	} else {
 		s.treeTranslator.PushOperand(pgsql.FunctionCall{
 			Function:   function,
-			Parameters: []pgsql.Expression{s.relationshipEndpointFunctionArgument(argument)},
+			Parameters: []pgsql.Expression{pgsql.NewLiteral(s.graphID, pgsql.Int4), s.relationshipEndpointFunctionArgument(argument)},
 			CastType:   pgsql.NodeComposite,
 		})
 	}

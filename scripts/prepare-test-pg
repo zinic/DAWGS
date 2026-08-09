@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+readonly program_name="${0##*/}"
+readonly admin_connection="${CONNECTION_STRING:-}"
+state_dir=""
+database_name=""
+owner_role=""
+operator_role=""
+target_role=""
+old_writer_role=""
+preparation_role=""
+system_identifier=""
+
+die() {
+    printf '%s: %s\n' "${program_name}" "$*" >&2
+    exit 1
+}
+
+require_command() {
+    command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
+}
+
+connection_for() {
+    local role="$1" password="$2" database="$3"
+    python3 - "${admin_connection}" "${role}" "${password}" "${database}" <<'PY'
+import sys
+import urllib.parse
+
+value, role, password, database = sys.argv[1:]
+parsed = urllib.parse.urlsplit(value)
+if parsed.scheme not in ("postgres", "postgresql") or not parsed.hostname:
+    raise SystemExit("CONNECTION_STRING must be a PostgreSQL URL")
+host = parsed.hostname
+if ":" in host:
+    host = f"[{host}]"
+if parsed.port:
+    host = f"{host}:{parsed.port}"
+userinfo = urllib.parse.quote(role, safe="")
+if password:
+    userinfo += ":" + urllib.parse.quote(password, safe="")
+path = "/" + urllib.parse.quote(database, safe="")
+print(urllib.parse.urlunsplit((parsed.scheme, f"{userinfo}@{host}", path, parsed.query, "")))
+PY
+}
+
+admin_connection_for() {
+    local database="$1"
+    python3 - "${admin_connection}" "${database}" <<'PY'
+import sys
+import urllib.parse
+
+parsed = urllib.parse.urlsplit(sys.argv[1])
+print(urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "/" + urllib.parse.quote(sys.argv[2], safe=""), parsed.query, "")))
+PY
+}
+
+cleanup() {
+    local status=$? current_identifier=""
+    trap - EXIT HUP INT TERM
+    if [[ -n "${state_dir}" && -r "${state_dir}/state" ]]; then
+        current_identifier="$(psql "${admin_connection}" -XAtqc "select (pg_catalog.pg_control_system()).system_identifier::text" 2>/dev/null || true)"
+        if [[ -n "${system_identifier}" && "${current_identifier}" == "${system_identifier}" ]]; then
+            psql "${admin_connection}" -Xv ON_ERROR_STOP=1 \
+                -v database_name="${database_name}" \
+                -v owner_role="${owner_role}" \
+                -v operator_role="${operator_role}" \
+                -v target_role="${target_role}" \
+                -v old_writer_role="${old_writer_role}" \
+                -v preparation_role="${preparation_role}" <<'SQL' >/dev/null || true
+select pg_catalog.pg_terminate_backend(pid)
+from pg_catalog.pg_stat_activity
+where datname = :'database_name' and pid <> pg_catalog.pg_backend_pid();
+select pg_catalog.format('drop database if exists %I', :'database_name') \gexec
+select pg_catalog.format('drop role if exists %I', :'target_role') \gexec
+select pg_catalog.format('drop role if exists %I', :'old_writer_role') \gexec
+select pg_catalog.format('drop role if exists %I', :'operator_role') \gexec
+select pg_catalog.format('drop role if exists %I', :'preparation_role') \gexec
+select pg_catalog.format('drop role if exists %I', :'owner_role') \gexec
+SQL
+        else
+            printf '%s: refusing cleanup because cluster identity changed\n' "${program_name}" >&2
+            status=1
+        fi
+        rm -rf -- "${state_dir}"
+    fi
+    return "${status}"
+}
+
+main() {
+    [[ -n "${admin_connection}" ]] || die "CONNECTION_STRING admin coordinator URL is required"
+    [[ "${DAWGS_TEST_POSTGRES_DISPOSABLE:-}" == "1" ]] || die "DAWGS_TEST_POSTGRES_DISPOSABLE=1 is required"
+    [[ "${1:-}" == "--" && $# -gt 1 ]] || die "usage: ${program_name} -- COMMAND [ARG ...]"
+    shift
+    require_command psql
+    require_command python3
+    require_command mktemp
+
+    local nonce operator_password target_password writer_password preparation_password database_admin_connection
+    nonce="$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+    database_name="dawgs_t_${nonce}"
+    owner_role="${database_name}_owner"
+    operator_role="${database_name}_operator"
+    target_role="${database_name}_target"
+    old_writer_role="${database_name}_writer"
+    preparation_role="${database_name}_prepare"
+    operator_password="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+    target_password="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+    writer_password="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+    preparation_password="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+    system_identifier="$(psql "${admin_connection}" -XAtqc "select (pg_catalog.pg_control_system()).system_identifier::text")"
+    [[ "${system_identifier}" =~ ^[0-9]+$ ]] || die "unable to read PostgreSQL system identifier"
+
+    state_dir="$(mktemp -d "${TMPDIR:-/tmp}/dawgs-role-test.XXXXXXXX")"
+    chmod 700 "${state_dir}"
+    umask 077
+    {
+        printf 'system_identifier=%s\n' "${system_identifier}"
+        printf 'database=%s\n' "${database_name}"
+        printf 'owner=%s\n' "${owner_role}"
+        printf 'operator=%s\n' "${operator_role}"
+        printf 'target=%s\n' "${target_role}"
+        printf 'old_writer=%s\n' "${old_writer_role}"
+        printf 'preparation=%s\n' "${preparation_role}"
+    } >"${state_dir}/state"
+    chmod 600 "${state_dir}/state"
+    trap cleanup EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+
+    psql "${admin_connection}" -Xv ON_ERROR_STOP=1 \
+        -v database_name="${database_name}" \
+        -v owner_role="${owner_role}" \
+        -v operator_role="${operator_role}" -v operator_password="${operator_password}" \
+        -v target_role="${target_role}" -v target_password="${target_password}" \
+        -v old_writer_role="${old_writer_role}" -v writer_password="${writer_password}" \
+        -v preparation_role="${preparation_role}" <<'SQL' >/dev/null
+select pg_catalog.format('create role %I nologin password null', :'owner_role') \gexec
+select pg_catalog.format('create role %I login password %L nosuperuser nocreatedb nocreaterole noinherit', :'operator_role', :'operator_password') \gexec
+select pg_catalog.format('create role %I login password %L nosuperuser nocreatedb nocreaterole noinherit', :'target_role', :'target_password') \gexec
+select pg_catalog.format('create role %I login password %L nosuperuser nocreatedb nocreaterole noinherit', :'old_writer_role', :'writer_password') \gexec
+select pg_catalog.format('create role %I nologin password null nosuperuser nocreatedb nocreaterole noinherit', :'preparation_role') \gexec
+select pg_catalog.format('create database %I owner %I', :'database_name', :'owner_role') \gexec
+select pg_catalog.format('revoke all on database %I from public', :'database_name') \gexec
+select pg_catalog.format('grant connect,create,temp on database %I to %I', :'database_name', :'operator_role') \gexec
+select pg_catalog.format('grant connect on database %I to %I,%I,%I', :'database_name', :'target_role', :'old_writer_role', :'preparation_role') \gexec
+SQL
+
+    database_admin_connection="$(admin_connection_for "${database_name}")"
+    psql "${database_admin_connection}" -Xv ON_ERROR_STOP=1 -v operator_role="${operator_role}" <<'SQL' >/dev/null
+revoke create on schema public from public;
+select pg_catalog.format('grant usage,create on schema public to %I', :'operator_role') \gexec
+SQL
+
+    CONNECTION_STRING="$(connection_for "${operator_role}" "${operator_password}" "${database_name}")" \
+    PG_TEST_ADMIN_CONNECTION_STRING="${database_admin_connection}" \
+    PG_TEST_TARGET_CONNECTION_STRING="$(connection_for "${target_role}" "${target_password}" "${database_name}")" \
+    PG_TEST_OLD_WRITER_CONNECTION_STRING="$(connection_for "${old_writer_role}" "${writer_password}" "${database_name}")" \
+    PG_TEST_PREPARATION_CONNECTION_STRING="$(connection_for "${preparation_role}" "${preparation_password}" "${database_name}")" \
+    PG_TEST_PREPARATION_PASSWORD="${preparation_password}" \
+    PG_TEST_DATABASE_NAME="${database_name}" \
+    PG_TEST_OWNER_ROLE="${owner_role}" \
+    PG_TEST_OPERATOR_ROLE="${operator_role}" \
+    PG_TEST_TARGET_ROLE="${target_role}" \
+    PG_TEST_OLD_WRITER_ROLE="${old_writer_role}" \
+    PG_TEST_PREPARATION_ROLE="${preparation_role}" \
+    "$@"
+}
+
+main "$@"

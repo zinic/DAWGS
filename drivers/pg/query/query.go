@@ -14,6 +14,10 @@ type Query struct {
 	tx graph.Transaction
 }
 
+type simpleProtocolExecutor interface {
+	ExecSimple(statement string) error
+}
+
 func On(tx graph.Transaction) Query {
 	return Query{
 		tx: tx,
@@ -193,6 +197,103 @@ func (s Query) CreatePropertyConstraint(indexName, tableName, fieldName string, 
 	return s.exec(formatCreatePropertyConstraint(indexName, tableName, fieldName, indexType), nil)
 }
 
+func (s Query) CreateEdgePropertyConstraint(graphID int32, constraint graph.Constraint) error {
+	if constraint.Type != graph.BTreeIndex {
+		return fmt.Errorf("only b-tree indexing is supported for edge property constraints")
+	}
+	logicalName := model.ConstraintName(model.EdgePartitionTableName(graphID), constraint)
+	result := s.tx.Raw(`insert into public.edge_property_constraint
+  (graph_id, logical_name, property_name, constraint_type, collation_name, lifecycle_state)
+values (@graph_id, @logical_name, @property_name, 'btree', 'default', 'pending')
+on conflict (graph_id, property_name) do update
+set logical_name=excluded.logical_name,lifecycle_state='pending'
+where edge_property_constraint.constraint_type='btree'
+  and edge_property_constraint.collation_name='default'
+	returning constraint_id`, map[string]any{
+		"graph_id": graphID, "logical_name": logicalName, "property_name": constraint.Field,
+	})
+	if !result.Next() {
+		if err := result.Error(); err != nil {
+			result.Close()
+			return err
+		}
+		result.Close()
+		return fmt.Errorf("edge property constraint %q conflicts with incompatible registry semantics", constraint.Field)
+	}
+	var constraintID int64
+	if err := result.Scan(&constraintID); err != nil {
+		result.Close()
+		return err
+	}
+	if err := result.Error(); err != nil {
+		result.Close()
+		return err
+	}
+	result.Close()
+	if err := s.exec(`lock table public.edge in share row exclusive mode`, nil); err != nil {
+		return err
+	}
+	if err := s.exec(`delete from public.edge_property_unique_value
+where graph_id=@graph_id and constraint_id=@constraint_id`, map[string]any{
+		"graph_id": graphID, "constraint_id": constraintID,
+	}); err != nil {
+		return err
+	}
+	if err := s.exec(`insert into public.edge_property_unique_value (graph_id,constraint_id,property_value,edge_id)
+select e.graph_id,@constraint_id,e.properties ->> @property_name,e.id
+from public.edge e where e.graph_id=@graph_id and e.properties ->> @property_name is not null`, map[string]any{
+		"graph_id": graphID, "constraint_id": constraintID, "property_name": constraint.Field,
+	}); err != nil {
+		return err
+	}
+	return s.exec(`update public.edge_property_constraint set lifecycle_state='active'
+where graph_id=@graph_id and constraint_id=@constraint_id and lifecycle_state='pending'`, map[string]any{
+		"graph_id": graphID, "constraint_id": constraintID,
+	})
+}
+
+func (s Query) SelectEdgePropertyConstraints(graphID int32) (map[string]graph.Constraint, error) {
+	result := s.tx.Raw(`select logical_name,property_name,constraint_type
+from public.edge_property_constraint where graph_id=@graph_id and lifecycle_state in ('pending','active')
+order by logical_name`, map[string]any{"graph_id": graphID})
+	defer result.Close()
+	constraints := map[string]graph.Constraint{}
+	for result.Next() {
+		var logicalName, propertyName, constraintType string
+		if err := result.Scan(&logicalName, &propertyName, &constraintType); err != nil {
+			return nil, err
+		}
+		if constraintType != "btree" {
+			return nil, fmt.Errorf("unsupported edge property constraint type %q", constraintType)
+		}
+		constraints[logicalName] = graph.Constraint{Name: logicalName, Field: propertyName, Type: graph.BTreeIndex}
+	}
+	return constraints, result.Error()
+}
+
+func (s Query) DropEdgePropertyConstraint(graphID int32, logicalName string) error {
+	if err := s.exec(`update public.edge_property_constraint set lifecycle_state='draining'
+where graph_id=@graph_id and logical_name=@logical_name and lifecycle_state in ('pending','active')`, map[string]any{
+		"graph_id": graphID, "logical_name": logicalName,
+	}); err != nil {
+		return err
+	}
+	if err := s.exec(`lock table public.edge in share row exclusive mode`, nil); err != nil {
+		return err
+	}
+	if err := s.exec(`delete from public.edge_property_unique_value v using public.edge_property_constraint c
+where c.graph_id=@graph_id and c.logical_name=@logical_name and c.lifecycle_state='draining'
+  and v.graph_id=c.graph_id and v.constraint_id=c.constraint_id`, map[string]any{
+		"graph_id": graphID, "logical_name": logicalName,
+	}); err != nil {
+		return err
+	}
+	return s.exec(`update public.edge_property_constraint set lifecycle_state='tombstoned'
+where graph_id=@graph_id and logical_name=@logical_name and lifecycle_state='draining'`, map[string]any{
+		"graph_id": graphID, "logical_name": logicalName,
+	})
+}
+
 func (s Query) DropIndex(indexName string) error {
 	return s.exec(formatDropPropertyIndex(indexName), nil)
 }
@@ -202,6 +303,9 @@ func (s Query) DropConstraint(constraintName string) error {
 }
 
 func (s Query) CreateSchema() error {
+	if executor, ok := s.tx.(simpleProtocolExecutor); ok {
+		return executor.ExecSimple(sqlSchemaUp)
+	}
 	if err := s.exec(sqlSchemaUp, nil); err != nil {
 		return err
 	}
@@ -210,6 +314,9 @@ func (s Query) CreateSchema() error {
 }
 
 func (s Query) DropSchema() error {
+	if executor, ok := s.tx.(simpleProtocolExecutor); ok {
+		return executor.ExecSimple(sqlSchemaDown)
+	}
 	if err := s.exec(sqlSchemaDown, nil); err != nil {
 		return err
 	}
@@ -220,7 +327,7 @@ func (s Query) DropSchema() error {
 func (s Query) insertGraph(name string) (model.Graph, error) {
 	var (
 		graphID int32
-		result  = s.tx.Raw(sqlInsertGraph, map[string]any{
+		result  = s.tx.Raw(`select public.dawgs_provision_graph(@name)`, map[string]any{
 			"name": name,
 		})
 	)
@@ -249,6 +356,28 @@ func (s Query) CreatePartitionTable(name, parent string, graphID int32) (model.G
 	return model.GraphPartition{
 		Name: name,
 	}, nil
+}
+
+func (s Query) CreateEdgeParentTable(name, parent string, graphID int32) (model.GraphPartition, error) {
+	if err := s.exec(formatCreateEdgeParentTable(name, parent, graphID), nil); err != nil {
+		return model.GraphPartition{}, err
+	}
+
+	return model.NewGraphPartition(name), nil
+}
+
+// CreateEdgeKindPartition ensures the physical leaf for a graph/kind pair.
+// Callers must have already established the graph-scoped edge parent.
+func (s Query) CreateEdgeKindPartition(graphID int32, kindID int16) (model.EdgeKindPartition, error) {
+	name := model.EdgeKindPartitionTableName(graphID, kindID)
+	if err := s.exec(`select public.dawgs_provision_edge_kind_leaf(@graph_id,@kind_id)`, map[string]any{
+		"graph_id": graphID,
+		"kind_id":  kindID,
+	}); err != nil {
+		return model.EdgeKindPartition{}, err
+	}
+
+	return model.EdgeKindPartition{KindID: kindID, Name: name}, nil
 }
 
 func (s Query) SelectTableIndexDefinitions(tableName string) ([]string, error) {
@@ -295,15 +424,20 @@ func (s Query) SelectKindID(kind graph.Kind) (int16, error) {
 	return kindID, result.Error()
 }
 
-func (s Query) assertGraphPartitionIndexes(partitions model.GraphPartitions, indexChanges model.IndexChangeSet) error {
+func (s Query) assertGraphPartitionIndexes(graphID int32, partitions model.GraphPartitions, indexChanges model.IndexChangeSet) error {
 	for _, indexToRemove := range append(indexChanges.NodeIndexesToRemove, indexChanges.EdgeIndexesToRemove...) {
 		if err := s.DropIndex(indexToRemove); err != nil {
 			return err
 		}
 	}
 
-	for _, constraintToRemove := range append(indexChanges.NodeConstraintsToRemove, indexChanges.EdgeConstraintsToRemove...) {
+	for _, constraintToRemove := range indexChanges.NodeConstraintsToRemove {
 		if err := s.DropConstraint(constraintToRemove); err != nil {
+			return err
+		}
+	}
+	for _, constraintToRemove := range indexChanges.EdgeConstraintsToRemove {
+		if err := s.DropEdgePropertyConstraint(graphID, constraintToRemove); err != nil {
 			return err
 		}
 	}
@@ -327,7 +461,8 @@ func (s Query) assertGraphPartitionIndexes(partitions model.GraphPartitions, ind
 	}
 
 	for constraintName, constraint := range indexChanges.EdgeConstraintsToAdd {
-		if err := s.CreatePropertyConstraint(constraintName, partitions.Edge.Name, constraint.Field, constraint.Type); err != nil {
+		_ = constraintName
+		if err := s.CreateEdgePropertyConstraint(graphID, constraint); err != nil {
 			return err
 		}
 	}
@@ -379,6 +514,9 @@ func (s Query) AssertGraph(schema graph.Graph, definition model.Graph) (model.Gr
 	if presentEdgePartition, err := s.describeGraphPartition(definition.Partitions.Edge.Name); err != nil {
 		return model.Graph{}, err
 	} else {
+		if presentEdgePartition.Constraints, err = s.SelectEdgePropertyConstraints(definition.ID); err != nil {
+			return model.Graph{}, err
+		}
 		for presentEdgeIndexName := range presentEdgePartition.Indexes {
 			if _, hasMatchingDefinition := requiredEdgePartition.Indexes[presentEdgeIndexName]; !hasMatchingDefinition {
 				indexChangeSet.EdgeIndexesToRemove = append(indexChangeSet.EdgeIndexesToRemove, presentEdgeIndexName)
@@ -417,7 +555,7 @@ func (s Query) AssertGraph(schema graph.Graph, definition model.Graph) (model.Gr
 			Node: requiredNodePartition,
 			Edge: requiredEdgePartition,
 		},
-	}, s.assertGraphPartitionIndexes(definition.Partitions, indexChangeSet)
+	}, s.assertGraphPartitionIndexes(definition.ID, definition.Partitions, indexChangeSet)
 }
 
 func (s Query) createGraphPartitions(definition model.Graph) (model.Graph, error) {
@@ -431,8 +569,16 @@ func (s Query) createGraphPartitions(definition model.Graph) (model.Graph, error
 	} else {
 		definition.Partitions.Node = nodePartition
 	}
+	if err := s.exec(fmt.Sprintf(`drop trigger if exists delete_node_edges on %s`, nodePartitionName), nil); err != nil {
+		return model.Graph{}, err
+	}
+	if err := s.exec(fmt.Sprintf(`create trigger delete_node_edges after delete on %s
+referencing old table as deleted_nodes for each statement
+execute function public.delete_node_edges()`, nodePartitionName), nil); err != nil {
+		return model.Graph{}, err
+	}
 
-	if edgePartition, err := s.CreatePartitionTable(edgePartitionName, model.EdgeTable, definition.ID); err != nil {
+	if edgePartition, err := s.CreateEdgeParentTable(edgePartitionName, model.EdgeTable, definition.ID); err != nil {
 		return model.Graph{}, err
 	} else {
 		definition.Partitions.Edge = edgePartition
@@ -444,10 +590,23 @@ func (s Query) createGraphPartitions(definition model.Graph) (model.Graph, error
 func (s Query) CreateGraph(schema graph.Graph) (model.Graph, error) {
 	if definition, err := s.insertGraph(schema.Name); err != nil {
 		return model.Graph{}, err
-	} else if definition, err := s.createGraphPartitions(definition); err != nil {
-		return model.Graph{}, err
 	} else {
 		return s.AssertGraph(schema, definition)
+	}
+}
+
+// ProvisionGraph creates or resolves only the canonical graph partitions via
+// the security-definer provisioning contract. It intentionally does not
+// reconcile user-declared indexes or constraints, which remain an owner or
+// operator schema-management action on an accepted restricted target.
+func (s Query) ProvisionGraph(name string) (model.Graph, error) {
+	if definition, err := s.insertGraph(name); err != nil {
+		return model.Graph{}, err
+	} else if partitions, err := s.selectGraphPartitions(definition.ID); err != nil {
+		return model.Graph{}, err
+	} else {
+		definition.Partitions = partitions
+		return definition, nil
 	}
 }
 

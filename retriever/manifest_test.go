@@ -2,7 +2,10 @@ package retriever
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/specterops/dawgs/drivers/pg"
 )
 
 func TestManifestValidateRejectsUnsupportedFormat(t *testing.T) {
@@ -221,4 +224,32 @@ func newValidTestManifest(graphCount int) Manifest {
 		NodeActionCounts: map[string]int{},
 		EdgeActionCounts: map[string]int{},
 	}, graphCount)
+}
+
+func TestManifestValidatesPostgresSourceMetadataDigest(t *testing.T) {
+	value := newValidTestManifest(0)
+	health := pg.LayoutHealth{
+		LayoutVersion:       2,
+		State:               "v2_accepted",
+		TopologyFingerprint: "sha256:topology",
+		GraphParentCount:    2,
+		KindCount:           3,
+		LeafCount:           6,
+		ServerVersion:       "18.0",
+		ServerVersionNum:    180000,
+	}
+	digest, err := postgresMetadataSHA256(health)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value.Source.Postgres = &health
+	value.Source.PostgresSHA256 = digest
+	if err := value.Validate(); err != nil {
+		t.Fatalf("validate PostgreSQL source metadata: %v", err)
+	}
+
+	value.Source.Postgres.LeafCount++
+	if err := value.Validate(); err == nil || !strings.Contains(err.Error(), "sha256 mismatch") {
+		t.Fatalf("expected PostgreSQL metadata checksum failure, got %v", err)
+	}
 }

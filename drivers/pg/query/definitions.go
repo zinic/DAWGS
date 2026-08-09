@@ -3,8 +3,8 @@ package query
 import "regexp"
 
 var (
-	pgPropertyIndexRegex = regexp.MustCompile(`(?i)^create\s+(unique)?(?:\s+)?index\s+([^ ]+)\s+on\s+\S+\s+using\s+([^ ]+)\s+\(+properties\s+->>\s+'([^:]+)::.+$`)
-	pgColumnIndexRegex   = regexp.MustCompile(`(?i)^create\s+(unique)?(?:\s+)?index\s+([^ ]+)\s+on\s+\S+\s+using\s+([^ ]+)\s+\(([^)]+)\)(?:\s+include\s+\(([^)]+)\))?$`)
+	pgPropertyIndexRegex = regexp.MustCompile(`(?i)^create\s+(unique)?(?:\s+)?index\s+([^ ]+)\s+on\s+(?:only\s+)?\S+\s+using\s+([^ ]+)\s+\(+properties\s+->>\s+'([^:]+)::.+$`)
+	pgColumnIndexRegex   = regexp.MustCompile(`(?i)^create\s+(unique)?(?:\s+)?index\s+([^ ]+)\s+on\s+(?:only\s+)?\S+\s+using\s+([^ ]+)\s+\(([^)]+)\)(?:\s+include\s+\(([^)]+)\))?$`)
 )
 
 const (

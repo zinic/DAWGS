@@ -18,42 +18,42 @@ func TestBuildNodeDeleteStatement(t *testing.T) {
 
 	t.Run("no filters deletes all nodes", func(t *testing.T) {
 		statement, arguments := buildNodeDeleteStatement(false, nil, nil)
-		require.Equal(t, "delete from node", statement)
+		require.Equal(t, "delete from public.node", statement)
 		require.Empty(t, arguments)
 	})
 
 	t.Run("include only", func(t *testing.T) {
 		statement, arguments := buildNodeDeleteStatement(true, includeIDs, nil)
-		require.Equal(t, "delete from node where kind_ids operator (pg_catalog.&&) $1::int2[]", statement)
+		require.Equal(t, "delete from public.node where kind_ids operator (pg_catalog.&&) $1::int2[]", statement)
 		require.Equal(t, []any{includeIDs}, arguments)
 	})
 
 	t.Run("exclude only", func(t *testing.T) {
 		statement, arguments := buildNodeDeleteStatement(false, nil, excludeIDs)
-		require.Equal(t, "delete from node where not (kind_ids operator (pg_catalog.&&) $1::int2[])", statement)
+		require.Equal(t, "delete from public.node where not (kind_ids operator (pg_catalog.&&) $1::int2[])", statement)
 		require.Equal(t, []any{excludeIDs}, arguments)
 	})
 
 	t.Run("include and exclude are positionally numbered", func(t *testing.T) {
 		statement, arguments := buildNodeDeleteStatement(true, includeIDs, excludeIDs)
-		require.Equal(t, "delete from node where kind_ids operator (pg_catalog.&&) $1::int2[] and not (kind_ids operator (pg_catalog.&&) $2::int2[])", statement)
+		require.Equal(t, "delete from public.node where kind_ids operator (pg_catalog.&&) $1::int2[] and not (kind_ids operator (pg_catalog.&&) $2::int2[])", statement)
 		require.Equal(t, []any{includeIDs, excludeIDs}, arguments)
 	})
 
 	t.Run("empty excludeIDs cannot widen the delete", func(t *testing.T) {
 		// A requested-but-unresolved exclusion must never emit a not(... && '{}') clause that matches every row.
 		statement, arguments := buildNodeDeleteStatement(false, nil, []int16{})
-		require.Equal(t, "delete from node", statement)
+		require.Equal(t, "delete from public.node", statement)
 		require.Empty(t, arguments)
 
 		statement, arguments = buildNodeDeleteStatement(true, includeIDs, []int16{})
-		require.Equal(t, "delete from node where kind_ids operator (pg_catalog.&&) $1::int2[]", statement)
+		require.Equal(t, "delete from public.node where kind_ids operator (pg_catalog.&&) $1::int2[]", statement)
 		require.Equal(t, []any{includeIDs}, arguments)
 	})
 
 	t.Run("include requested with empty IDs is a tolerant no-op predicate", func(t *testing.T) {
 		statement, arguments := buildNodeDeleteStatement(true, []int16{}, nil)
-		require.Equal(t, "delete from node where kind_ids operator (pg_catalog.&&) $1::int2[]", statement)
+		require.Equal(t, "delete from public.node where kind_ids operator (pg_catalog.&&) $1::int2[]", statement)
 		require.Equal(t, []any{[]int16{}}, arguments)
 	})
 }

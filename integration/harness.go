@@ -25,12 +25,15 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/specterops/dawgs"
 	"github.com/specterops/dawgs/drivers/neo4j"
 	"github.com/specterops/dawgs/drivers/pg"
+	"github.com/specterops/dawgs/drivers/pg/migrate"
 	"github.com/specterops/dawgs/graph"
 	"github.com/specterops/dawgs/opengraph"
 	"github.com/specterops/dawgs/util/size"
@@ -41,6 +44,10 @@ const ConnectionStringEnv = "CONNECTION_STRING"
 var (
 	localDatasetFlag   = flag.String("local-dataset", "", "name of a local dataset to test (e.g. local/phantom)")
 	errFixtureRollback = errors.New("fixture rollback")
+	pgDisposable       = struct {
+		sync.Mutex
+		targets map[string]string
+	}{targets: map[string]string{}}
 )
 
 type CleanupMode int
@@ -118,6 +125,9 @@ func Open(t *testing.T, opts Options) *Session {
 		}
 		t.Fatalf("%s is not a %s connection string", connEnv, opts.RequireDriver)
 	}
+	if driver == pg.DriverName && os.Getenv("DAWGS_TEST_POSTGRES_DISPOSABLE") == "1" {
+		connStr = bootstrapDisposablePostgres(t, ctx, connStr)
+	}
 
 	cfg := dawgs.Config{
 		ConnectionString:      connStr,
@@ -169,6 +179,64 @@ func Open(t *testing.T, opts Options) *Session {
 	})
 
 	return session
+}
+
+func bootstrapDisposablePostgres(t *testing.T, ctx context.Context, operatorConnection string) string {
+	t.Helper()
+	pgDisposable.Lock()
+	defer pgDisposable.Unlock()
+	if target, found := pgDisposable.targets[operatorConnection]; found {
+		return target
+	}
+
+	target := os.Getenv("PG_TEST_TARGET_CONNECTION_STRING")
+	retirement := os.Getenv("PG_TEST_ADMIN_CONNECTION_STRING")
+	if target == "" || retirement == "" {
+		t.Fatal("disposable PostgreSQL integration requires target and retirement connections")
+	}
+	targetConnection, err := pgx.Connect(ctx, target)
+	if err != nil {
+		t.Fatalf("opening disposable PostgreSQL target connection: %v", err)
+	}
+	var markerPresent bool
+	if err := targetConnection.QueryRow(ctx, `select pg_catalog.to_regclass('public.dawgs_schema_layout') is not null`).Scan(&markerPresent); err != nil {
+		targetConnection.Close(ctx)
+		t.Fatalf("checking disposable PostgreSQL layout marker: %v", err)
+	}
+	if markerPresent {
+		var accepted bool
+		if err := targetConnection.QueryRow(ctx, `select state='v2_accepted' and target_role_name=session_user
+from public.dawgs_schema_layout where singleton`).Scan(&accepted); err != nil {
+			targetConnection.Close(ctx)
+			t.Fatalf("checking reusable disposable PostgreSQL target: %v", err)
+		}
+		if accepted {
+			targetConnection.Close(ctx)
+			pgDisposable.targets[operatorConnection] = target
+			return target
+		}
+	}
+	targetConnection.Close(ctx)
+	engine, err := migrate.New(ctx, operatorConnection)
+	if err != nil {
+		t.Fatalf("opening disposable PostgreSQL bootstrap engine: %v", err)
+	}
+	defer engine.Close()
+	engine.AllowUnreleasedDisposable = true
+	engine.RetirementConnectionString = retirement
+	installation, err := engine.Bootstrap(ctx)
+	if err != nil {
+		t.Fatalf("bootstrapping disposable PostgreSQL integration database: %v", err)
+	}
+	confirmation, err := engine.ConfirmBootstrap(ctx, installation.MigrationID, target)
+	if err != nil {
+		t.Fatalf("confirming disposable PostgreSQL target handoff: %v", err)
+	}
+	if _, err := engine.CompleteBootstrap(ctx, installation.MigrationID, confirmation.ConfirmationToken, target); err != nil {
+		t.Fatalf("completing disposable PostgreSQL target handoff: %v", err)
+	}
+	pgDisposable.targets[operatorConnection] = target
+	return target
 }
 
 func (s *Session) ClearGraph(t *testing.T) {

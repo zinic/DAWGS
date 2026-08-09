@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+readonly script_dir="$(cd -P -- "$(dirname -- "$0")" && pwd)"
+readonly source_instance="independent-restore-source-$$"
+readonly target_instance="independent-restore-target-$$"
+postgres_args=()
+if [[ -n "${DAWGS_TEST_POSTGRES_BIN_DIR:-}" ]]; then
+    postgres_args=(--bin-dir "${DAWGS_TEST_POSTGRES_BIN_DIR}")
+fi
+
+cleanup() {
+    local status=$?
+    trap - EXIT HUP INT TERM
+    "${script_dir}/test-postgres" "${postgres_args[@]}" down "${target_instance}" >/dev/null 2>&1 || true
+    "${script_dir}/test-postgres" "${postgres_args[@]}" down "${source_instance}" >/dev/null 2>&1 || true
+    return "${status}"
+}
+
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+source_url="$("${script_dir}/test-postgres" "${postgres_args[@]}" up "${source_instance}")"
+target_url="$("${script_dir}/test-postgres" "${postgres_args[@]}" up "${target_instance}")"
+
+PG_TEST_RESTORE_SOURCE_ADMIN="${source_url}" \
+PG_TEST_RESTORE_TARGET_ADMIN="${target_url}" \
+go test -tags independent_restore_integration -race -count=1 ./drivers/pg/migrate

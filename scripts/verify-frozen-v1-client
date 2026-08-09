@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+readonly source_revision="bd64d910ef1bfe01b886fa584796275e5c533c8e"
+readonly repository_root="$(git rev-parse --show-toplevel)"
+readonly frozen_source="${repository_root}/drivers/pg/migrate/testdata/v1_export_client.go.txt"
+requested_output_dir="${1:-${repository_root}/dist}"
+if [[ "${requested_output_dir}" = /* ]]; then
+    readonly output_dir="${requested_output_dir}"
+else
+    readonly output_dir="${repository_root}/${requested_output_dir}"
+fi
+temporary_directory=""
+
+cleanup() {
+    local status=$?
+    trap - EXIT HUP INT TERM
+    if [[ -n "${temporary_directory}" && -d "${temporary_directory}" ]]; then
+        rm -rf -- "${temporary_directory}"
+    fi
+    return "${status}"
+}
+trap cleanup EXIT HUP INT TERM
+
+git cat-file -e "${source_revision}^{commit}"
+temporary_directory="$(mktemp -d "${TMPDIR:-/tmp}/dawgs-v1-client.XXXXXXXX")"
+mkdir -p -- "${temporary_directory}/source" "${output_dir}"
+git archive --format=tar "${source_revision}" | tar -xf - -C "${temporary_directory}/source"
+cp -- "${frozen_source}" "${temporary_directory}/source/cmd/export/main.go"
+
+(
+    cd "${temporary_directory}/source"
+    CGO_ENABLED=0 go build -trimpath -buildvcs=false -o "${output_dir}/dawgs-v1-export" ./cmd/export
+)
+if ldd "${output_dir}/dawgs-v1-export" >/dev/null 2>&1; then
+    printf 'frozen V1 client is dynamically linked\n' >&2
+    exit 1
+fi
+go version -m "${output_dir}/dawgs-v1-export" > "${output_dir}/dawgs-v1-export.metadata.txt"
+grep -F 'github.com/specterops/dawgs' "${output_dir}/dawgs-v1-export.metadata.txt"
+(
+    cd "${output_dir}"
+    sha256sum dawgs-v1-export > dawgs-v1-export.sha256
+    sha256sum -c dawgs-v1-export.sha256
+)

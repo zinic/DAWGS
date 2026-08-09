@@ -138,8 +138,8 @@ func TestRelationshipEndpointFunctionsUseEdgeCompositeArguments(t *testing.T) {
 	require.NoError(t, err)
 	normalized := strings.Join(strings.Fields(formatted), " ")
 
-	require.Contains(t, normalized, "start_node(((s0.e0).id, (s0.e0).start_id, (s0.e0).end_id, (s0.e0).kind_id, (s0.e0).properties)::edgecomposite)")
-	require.Contains(t, normalized, "end_node(((s0.e0).id, (s0.e0).start_id, (s0.e0).end_id, (s0.e0).kind_id, (s0.e0).properties)::edgecomposite)")
+	require.Contains(t, normalized, "start_node(0, ((s0.e0).id, (s0.e0).start_id, (s0.e0).end_id, (s0.e0).kind_id, (s0.e0).properties)::edgecomposite)")
+	require.Contains(t, normalized, "end_node(0, ((s0.e0).id, (s0.e0).start_id, (s0.e0).end_id, (s0.e0).kind_id, (s0.e0).properties)::edgecomposite)")
 	require.NotContains(t, normalized, "start_node(s0.e0)")
 	require.NotContains(t, normalized, "end_node(s0.e0)")
 }
@@ -161,8 +161,8 @@ RETURN p
 	require.NoError(t, err)
 	normalized := strings.Join(strings.Fields(formatted), " ")
 
-	require.Contains(t, normalized, "from edge i0")
-	require.Contains(t, normalized, "start_node((i0.id, i0.start_id, i0.end_id, i0.kind_id, i0.properties)::edgecomposite)")
+	require.Contains(t, normalized, "from public.edge_0 i0")
+	require.Contains(t, normalized, "start_node(0, (i0.id, i0.start_id, i0.end_id, i0.kind_id, i0.properties)::edgecomposite)")
 	require.NotContains(t, normalized, "start_node(i0)")
 }
 

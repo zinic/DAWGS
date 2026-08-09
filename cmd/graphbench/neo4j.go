@@ -24,6 +24,7 @@ import (
 
 	neo4jcore "github.com/neo4j/neo4j-go-driver/v5/neo4j"
 	"github.com/specterops/dawgs"
+	"github.com/specterops/dawgs/cypher/frontend"
 	dawgsneo4j "github.com/specterops/dawgs/drivers/neo4j"
 	"github.com/specterops/dawgs/graph"
 	"github.com/specterops/dawgs/opengraph"
@@ -122,8 +123,17 @@ func (s *neo4jRunner) runCase(ctx context.Context, iterations int, testCase Scal
 		record.Error = err.Error()
 		return record
 	}
+	regularQuery, err := frontend.ParseCypher(frontend.NewContext(), testCase.Cypher)
+	if err == nil {
+		err = frontend.RequireReadOnly(regularQuery)
+	}
+	if err != nil {
+		record.Status = StatusError
+		record.Error = err.Error()
+		return record
+	}
 
-	rowCount, stats, err := measureCypher(ctx, s.db, testCase.Cypher, params, iterations)
+	rowCount, logicalDigest, stats, err := measureCypher(ctx, s.db, testCase.Cypher, params, iterations)
 	if err != nil {
 		record.Status = StatusError
 		record.Error = err.Error()
@@ -131,6 +141,7 @@ func (s *neo4jRunner) runCase(ctx context.Context, iterations int, testCase Scal
 	}
 
 	record.RowCount = rowCount
+	record.LogicalDigest = logicalDigest
 	record.Stats = stats
 	applyRowExpectation(&record)
 

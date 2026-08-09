@@ -54,6 +54,7 @@ type batch struct {
 	relationshipUpdateByBuffer []graph.RelationshipUpdate
 	batchWriteSize             int
 	kindIDEncoder              Int2ArrayEncoder
+	err                        error
 }
 
 func newBatch(ctx context.Context, conn *pgxpool.Conn, schemaManager *SchemaManager, cfg *Config) (*batch, error) {
@@ -73,6 +74,15 @@ func newBatch(ctx context.Context, conn *pgxpool.Conn, schemaManager *SchemaMana
 }
 
 func (s *batch) WithGraph(schema graph.Graph) graph.Batch {
+	if s.err != nil {
+		return s
+	}
+	if s.innerTransaction.targetSchemaSet && s.innerTransaction.targetSchema.Name != schema.Name {
+		if err := s.tryFlush(0); err != nil {
+			s.err = fmt.Errorf("flushing buffered records before graph switch: %w", err)
+			return s
+		}
+	}
 	s.innerTransaction.WithGraph(schema)
 	return s
 }
@@ -121,7 +131,7 @@ func (s *batch) CreateNodes(nodes []*graph.Node) ([]graph.ID, error) {
 	}
 	defer tx.Rollback(s.ctx)
 
-	rows, err := tx.Query(s.ctx, createNodesReturningIDsStatement, graphTarget.ID, kindIDSlices, properties)
+	rows, err := tx.Query(s.ctx, fmt.Sprintf(createNodesReturningIDsStatement, qualifiedManagedRelation(graphTarget.Partitions.Node.Name)), graphTarget.ID, kindIDSlices, properties)
 	if err != nil {
 		return nil, err
 	}
@@ -289,7 +299,11 @@ func (s *batch) UpdateNodes(nodes []*graph.Node) error {
 }
 
 func (s *batch) flushNodeDeleteBuffer() error {
-	if _, err := s.innerTransaction.conn.Exec(s.ctx, deleteNodeWithIDStatement, s.nodeDeletionBuffer); err != nil {
+	graphTarget, err := s.innerTransaction.getTargetGraph()
+	if err != nil {
+		return err
+	}
+	if _, err := s.innerTransaction.conn.Exec(s.ctx, fmt.Sprintf(deleteNodeWithIDStatement, qualifiedManagedRelation(graphTarget.Partitions.Node.Name)), s.nodeDeletionBuffer); err != nil {
 		return err
 	}
 
@@ -298,7 +312,11 @@ func (s *batch) flushNodeDeleteBuffer() error {
 }
 
 func (s *batch) flushRelationshipDeleteBuffer() error {
-	if _, err := s.innerTransaction.conn.Exec(s.ctx, deleteEdgeWithIDStatement, s.relationshipDeletionBuffer); err != nil {
+	graphTarget, err := s.innerTransaction.getTargetGraph()
+	if err != nil {
+		return err
+	}
+	if _, err := s.innerTransaction.conn.Exec(s.ctx, fmt.Sprintf(deleteEdgeWithIDStatement, qualifiedManagedRelation(graphTarget.Partitions.Edge.Name)), s.relationshipDeletionBuffer); err != nil {
 		return err
 	}
 
@@ -360,7 +378,7 @@ func (s *batch) flushNodeCreateBufferWithIDs() error {
 
 	if graphTarget, err := s.innerTransaction.getTargetGraph(); err != nil {
 		return err
-	} else if _, err := s.innerTransaction.conn.Exec(s.ctx, createNodeWithIDBatchStatement, graphTarget.ID, nodeIDs, kindIDSlices, properties); err != nil {
+	} else if _, err := s.innerTransaction.conn.Exec(s.ctx, fmt.Sprintf(createNodeWithIDBatchStatement, qualifiedManagedRelation(graphTarget.Partitions.Node.Name)), graphTarget.ID, nodeIDs, kindIDSlices, properties); err != nil {
 		return err
 	}
 
@@ -394,7 +412,7 @@ func (s *batch) flushNodeCreateBufferWithoutIDs() error {
 
 	if graphTarget, err := s.innerTransaction.getTargetGraph(); err != nil {
 		return err
-	} else if _, err := s.innerTransaction.conn.Exec(s.ctx, createNodeWithoutIDBatchStatement, graphTarget.ID, kindIDSlices, properties); err != nil {
+	} else if _, err := s.innerTransaction.conn.Exec(s.ctx, fmt.Sprintf(createNodeWithoutIDBatchStatement, qualifiedManagedRelation(graphTarget.Partitions.Node.Name)), graphTarget.ID, kindIDSlices, properties); err != nil {
 		return err
 	}
 
@@ -662,14 +680,28 @@ func (s *batch) flushRelationshipUpdateByBuffer(updates *sql.RelationshipUpdateB
 	if graphTarget, err := s.innerTransaction.getTargetGraph(); err != nil {
 		return err
 	} else {
+		if err := s.ensureEdgeKindPartitions(graphTarget.ID, parameters.KindIDs); err != nil {
+			return err
+		}
 		query := sql.FormatRelationshipPartitionUpsert(graphTarget, updates.IdentityProperties)
+		arguments := parameters.Format(graphTarget)
+		if len(updates.IdentityProperties) == 1 {
+			arguments = append(arguments, updates.IdentityProperties[0])
+		}
 
-		if _, err := s.innerTransaction.conn.Exec(s.ctx, query, parameters.Format(graphTarget)...); err != nil {
+		if _, err := s.innerTransaction.conn.Exec(s.ctx, query, arguments...); err != nil {
 			return err
 		}
 	}
 
 	return nil
+}
+
+func (s *batch) ensureEdgeKindPartitions(graphID int32, kindIDs []int16) error {
+	return s.schemaManager.WriteTransaction(s.ctx, func(tx graph.Transaction) error {
+		_, err := s.schemaManager.EnsureEdgeKindPartitions(tx, graphID, kindIDs)
+		return err
+	}, OptionSetQueryExecMode(pgx.QueryExecModeSimpleProtocol))
 }
 
 func (s *batch) tryFlushRelationshipUpdateByBuffer() error {
@@ -783,7 +815,9 @@ func (s *batch) flushRelationshipCreateBuffer() error {
 		return err
 	} else if graphTarget, err := s.innerTransaction.getTargetGraph(); err != nil {
 		return err
-	} else if _, err := s.innerTransaction.conn.Exec(s.ctx, createEdgeBatchStatement, graphTarget.ID, createBatch.startIDs, createBatch.endIDs, createBatch.edgeKindIDs, createBatch.edgePropertyBags); err != nil {
+	} else if err := s.ensureEdgeKindPartitions(graphTarget.ID, createBatch.edgeKindIDs); err != nil {
+		return err
+	} else if _, err := s.innerTransaction.conn.Exec(s.ctx, fmt.Sprintf(createEdgeBatchStatement, qualifiedManagedRelation(graphTarget.Partitions.Edge.Name)), graphTarget.ID, createBatch.startIDs, createBatch.endIDs, createBatch.edgeKindIDs, createBatch.edgePropertyBags); err != nil {
 		slog.Info(fmt.Sprintf("Num merged property bags: %d - Num edge keys: %d - StartID batch size: %d", len(batchBuilder.edgePropertiesIndex), len(batchBuilder.keyToEdgeID), len(batchBuilder.relationshipUpdateBatch.startIDs)))
 		return err
 	}
@@ -793,6 +827,9 @@ func (s *batch) flushRelationshipCreateBuffer() error {
 }
 
 func (s *batch) tryFlush(batchWriteSize int) error {
+	if s.err != nil {
+		return s.err
+	}
 	if len(s.nodeUpdateByBuffer) > batchWriteSize {
 		if err := s.tryFlushNodeUpdateByBuffer(); err != nil {
 			return err
@@ -858,6 +895,9 @@ func (s *batch) UpdateRelationshipBy(update graph.RelationshipUpdate) error {
 }
 
 func (s *batch) Commit() error {
+	if s.err != nil {
+		return s.err
+	}
 	if err := s.tryFlush(0); err != nil {
 		return err
 	}

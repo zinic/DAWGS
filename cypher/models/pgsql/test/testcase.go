@@ -1,6 +1,7 @@
 package test
 
 import (
+	"bytes"
 	"context"
 	"embed"
 	"encoding/json"
@@ -357,20 +358,23 @@ func UpdateTranslationTestCases(mapper pgsql.KindMapper) error {
 						return err
 					} else if nextCases, _, err := caseFile.Load(); err != nil {
 						return err
-					} else if output, err := os.OpenFile(updatedCaseFilePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644); err != nil {
-						return err
 					} else {
 						formattedLicenseHeader := fmt.Sprintf(licenseHeader, time.Now().Year())
+						var output bytes.Buffer
 
-						if _, err := io.WriteString(output, formattedLicenseHeader); err != nil {
+						if _, err := io.WriteString(&output, formattedLicenseHeader); err != nil {
 							return err
 						}
 
 						for _, nextCase := range nextCases {
-							nextCase.WriteTo(output, mapper)
+							if err := nextCase.WriteTo(&output, mapper); err != nil {
+								return err
+							}
 						}
-
-						output.Close()
+						content := append(bytes.TrimRight(output.Bytes(), "\n"), '\n')
+						if err := os.WriteFile(updatedCaseFilePath, content, 0o644); err != nil {
+							return err
+						}
 					}
 				}
 			}

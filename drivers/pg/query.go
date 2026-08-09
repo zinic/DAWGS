@@ -2,6 +2,7 @@ package pg
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/specterops/dawgs/cypher/models/pgsql/translate"
 	"github.com/specterops/dawgs/graph"
@@ -31,8 +32,16 @@ func (s *liveQuery) runRegularQuery(allShortestPaths bool) graph.Result {
 		return graph.NewErrorResult(err)
 	} else if graphID, err := s.graphIDResolver(); err != nil {
 		return graph.NewErrorResult(err)
-	} else if translation, err := translate.FromCypher(s.ctx, regularQuery, s.kindMapper, false, graphID); err != nil {
+	} else if translation, err := translate.FromCypherResult(s.ctx, regularQuery, s.kindMapper, false, graphID); err != nil {
 		return graph.NewErrorResult(err)
+	} else if schemaManager, typeOK := s.kindMapper.(*SchemaManager); typeOK && translation.HasMutations {
+		if tx, ok := s.tx.(*transaction); ok && !tx.writable {
+			return graph.NewErrorResult(fmt.Errorf("mutating query requires a write transaction"))
+		}
+		if _, err := schemaManager.EnsureEdgeKindPartitions(s.tx, graphID, translation.RequiredEdgeKindIDs); err != nil {
+			return graph.NewErrorResult(err)
+		}
+		return s.tx.Raw(translation.Statement, translation.Parameters)
 	} else {
 		return s.tx.Raw(translation.Statement, translation.Parameters)
 	}

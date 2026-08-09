@@ -1,6 +1,11 @@
 package main
 
-import "github.com/specterops/dawgs/cypher/models/pgsql/translate"
+import (
+	"encoding/json"
+
+	"github.com/specterops/dawgs/cypher/models/pgsql/translate"
+	"github.com/specterops/dawgs/drivers/pg"
+)
 
 type PlanRecord struct {
 	Driver           string                         `json:"driver"`
@@ -11,6 +16,9 @@ type PlanRecord struct {
 	Params           map[string]any                 `json:"params,omitempty"`
 	SQL              string                         `json:"sql,omitempty"`
 	PGPlan           []string                       `json:"pg_plan,omitempty"`
+	PGPlanJSON       json.RawMessage                `json:"pg_plan_json,omitempty"`
+	PGLeaves         *pg.ExplainLeafSummary         `json:"pg_leaves,omitempty"`
+	PGLayout         *pg.LayoutHealth               `json:"pg_layout,omitempty"`
 	PGOperators      []string                       `json:"pg_operators,omitempty"`
 	Neo4jPlan        *Neo4jPlanNode                 `json:"neo4j_plan,omitempty"`
 	Neo4jOperators   []string                       `json:"neo4j_operators,omitempty"`

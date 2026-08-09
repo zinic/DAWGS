@@ -26,6 +26,7 @@ on:
 jobs:
   upload-main-coverage-files:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     outputs:
       coverage-artifact-id: ${{ steps.upload-coverage-artifact-step.outputs.artifact-id }}
     steps:
@@ -50,3 +51,5 @@ jobs:
         with:
           include-hidden-files: true
           path: .coverage/coverage.txt
+          retention-days: 30
+          if-no-files-found: error

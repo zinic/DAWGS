@@ -30,7 +30,7 @@ RETURN p`)
 	require.NoError(t, err)
 
 	require.Contains(t, formatted, "as p from s0 where")
-	require.Contains(t, formatted, "exists (select 1 from edge")
+	require.Contains(t, formatted, "exists (select 1 from public.edge_0")
 	require.Contains(t, formatted, "kind_id = any (array [3, 4]::int2[])")
 	require.Contains(t, formatted, "start_id = (s0.n0).id")
 	require.Contains(t, formatted, "end_id = (s0.n1).id")

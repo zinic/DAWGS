@@ -30,6 +30,7 @@ type config struct {
 	DatasetDir      string
 	Connection      string
 	PGConnection    string
+	PGMaintenance   string
 	Neo4jConnection string
 	Modes           []ExecutionMode
 	Iterations      int
@@ -52,6 +53,7 @@ func parseConfig(args []string, env func(string) string) (config, error) {
 	flags.StringVar(&cfg.DatasetDir, "dataset-dir", "integration/testdata", "dataset root")
 	flags.StringVar(&cfg.Connection, "connection", env("CONNECTION_STRING"), "single backend connection string")
 	flags.StringVar(&cfg.PGConnection, "pg-connection", env("PG_CONNECTION_STRING"), "PostgreSQL connection string")
+	flags.StringVar(&cfg.PGMaintenance, "pg-maintenance-connection", env("PG_MAINTENANCE_CONNECTION_STRING"), "direct PostgreSQL maintenance connection for deterministic VACUUM ANALYZE")
 	flags.StringVar(&cfg.Neo4jConnection, "neo4j-connection", env("NEO4J_CONNECTION_STRING"), "Neo4j connection string")
 	flags.StringVar(&rawModes, "modes", string(ModePostgresSQL), "comma-separated execution modes")
 	flags.IntVar(&cfg.Iterations, "iterations", 3, "timed iterations per case")
@@ -133,7 +135,7 @@ func main() {
 				fatal("postgres_sql mode requires -pg-connection, -connection, PG_CONNECTION_STRING, or CONNECTION_STRING")
 			}
 
-			runner, err := newPostgresSQLRunner(ctx, cfg.DatasetDir, pgConnection, corpus)
+			runner, err := newPostgresSQLRunner(ctx, cfg.DatasetDir, pgConnection, cfg.PGMaintenance, corpus)
 			if err != nil {
 				fatal("open postgres_sql runner: %v", err)
 			}

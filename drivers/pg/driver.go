@@ -4,9 +4,12 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/specterops/dawgs/drivers/pg/internal/catalog"
+	"github.com/specterops/dawgs/drivers/pg/internal/layout"
 	"github.com/specterops/dawgs/graph"
 	"github.com/specterops/dawgs/util/size"
 )
@@ -49,6 +52,12 @@ func NewDriver(graphQueryMemoryLimit size.Size, pool *pgxpool.Pool) *Driver {
 	}
 }
 
+// SetObservationSink installs an optional synchronous bounded-cardinality
+// observer shared by readiness and schema provisioning paths.
+func (s *Driver) SetObservationSink(sink ObservationSink) {
+	s.SchemaManager.observations.set(sink)
+}
+
 func (s *Driver) SetDefaultGraph(ctx context.Context, graphSchema graph.Graph) error {
 	return s.SchemaManager.SetDefaultGraph(ctx, graphSchema)
 }
@@ -76,7 +85,7 @@ func (s *Driver) BatchOperation(ctx context.Context, batchDelegate graph.BatchDe
 
 	if cfg, err := renderConfig(batchConfig.BatchSize, readWriteTxOptions, nil); err != nil {
 		return err
-	} else if conn, err := s.pool.Acquire(ctx); err != nil {
+	} else if conn, err := s.SchemaManager.acquireGuarded(ctx, false); err != nil {
 		return err
 	} else {
 		defer conn.Release()
@@ -93,6 +102,84 @@ func (s *Driver) BatchOperation(ctx context.Context, batchDelegate graph.BatchDe
 			return batch.Commit()
 		}
 	}
+}
+
+func (s *Driver) LayoutHealth(ctx context.Context) (LayoutHealth, error) {
+	facts, err := classifyPool(ctx, s.pool)
+	if err != nil {
+		return LayoutHealth{}, err
+	}
+	return layoutHealth(ctx, s.pool, facts)
+}
+
+type layoutHealthQuerier interface {
+	catalog.Querier
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func layoutHealth(ctx context.Context, queryer layoutHealthQuerier, facts layout.Facts) (LayoutHealth, error) {
+	health := LayoutHealth{LayoutVersion: facts.Version, State: string(facts.State), Drift: append([]string(nil), facts.Drift...)}
+	if facts.Structural {
+		err := queryer.QueryRow(ctx, `select
+  (select count(*) from public.graph),
+	  (select count(distinct kind_id) from public.dawgs_edge_kind_leaf where lifecycle_state='active'),
+	  (select count(*) from public.dawgs_edge_kind_leaf where lifecycle_state='active'),
+	  pg_catalog.current_setting('server_version'),pg_catalog.current_setting('server_version_num')::integer,
+	  coalesce(database_oid,0),coalesce(database_name,''),coalesce(system_identifier,''),identity_epoch,
+	  coalesce(owner_role_oid,0),coalesce(owner_role_name,''),coalesce(target_role_oid,0),coalesce(target_role_name,''),
+	  post_acceptance_smoke_status,coalesce(current_smoke_receipt_digest,'')
+	from public.dawgs_schema_layout where singleton`).Scan(
+			&health.GraphParentCount, &health.KindCount, &health.LeafCount,
+			&health.ServerVersion, &health.ServerVersionNum,
+			&health.DatabaseOID, &health.DatabaseName, &health.SystemIdentifier, &health.IdentityEpoch,
+			&health.OwnerRoleOID, &health.OwnerRoleName, &health.TargetRoleOID, &health.TargetRoleName,
+			&health.SmokeStatus, &health.SmokeReceiptDigest)
+		if err != nil {
+			return LayoutHealth{}, err
+		}
+		snapshot, err := catalog.ReadSnapshot(ctx, queryer)
+		if err != nil {
+			return LayoutHealth{}, err
+		}
+		health.TopologyFingerprint, err = catalog.Fingerprint(snapshot)
+		if err != nil {
+			return LayoutHealth{}, err
+		}
+	}
+	return health, nil
+}
+
+// Readiness is a read-only inspection that returns current layout facts even
+// when the accompanying typed error keeps the application closed. It never
+// initializes, reconciles, provisions, or mutates schema objects.
+func (s *Driver) Readiness(ctx context.Context) (LayoutHealth, error) {
+	started := time.Now()
+	conn, err := s.pool.Acquire(ctx)
+	if err != nil {
+		result, code := boundedErrorResult(err)
+		s.SchemaManager.observations.emit(Observation{Event: ObservationReadiness, Result: result, LayoutErrorCode: code, Duration: time.Since(started)})
+		return LayoutHealth{}, err
+	}
+	defer conn.Release()
+	facts, err := classifyConnection(ctx, conn)
+	if err != nil {
+		result, code := boundedErrorResult(err)
+		s.SchemaManager.observations.emit(Observation{Event: ObservationReadiness, Result: result, LayoutErrorCode: code, Duration: time.Since(started)})
+		return LayoutHealth{}, err
+	}
+	health, err := layoutHealth(ctx, conn, facts.Facts)
+	if err != nil {
+		result, code := boundedErrorResult(err)
+		s.SchemaManager.observations.emit(Observation{Event: ObservationReadiness, Result: result, LayoutErrorCode: code, Duration: time.Since(started)})
+		return LayoutHealth{}, err
+	}
+	readinessErr := requireOperational(facts, false)
+	result, code := boundedErrorResult(readinessErr)
+	s.SchemaManager.observations.emit(Observation{Event: ObservationReadiness, Result: result,
+		LayoutState: health.State, LayoutErrorCode: code, TopologyFingerprint: health.TopologyFingerprint,
+		GraphParentCount: health.GraphParentCount, KindCount: health.KindCount, LeafCount: health.LeafCount,
+		ServerMajor: health.ServerVersionNum / 10000, Duration: time.Since(started)})
+	return health, readinessErr
 }
 
 func (s *Driver) Close(ctx context.Context) error {
@@ -142,8 +229,15 @@ func (s *Driver) AssertSchema(ctx context.Context, schema graph.Schema) error {
 	}
 
 	if schema.DefaultGraph.Name != "" {
+		defaultGraphSchema := schema.DefaultGraph
+		for _, graphSchema := range schema.Graphs {
+			if graphSchema.Name == schema.DefaultGraph.Name {
+				defaultGraphSchema = graphSchema
+				break
+			}
+		}
 		// There's a default graph defined. Assert that it exists and has a matching schema
-		if err := s.SchemaManager.AssertDefaultGraph(ctx, schema.DefaultGraph); err != nil {
+		if err := s.SchemaManager.AssertDefaultGraph(ctx, defaultGraphSchema); err != nil {
 			return err
 		}
 	}
@@ -173,13 +267,14 @@ func (s *Driver) RefreshKinds(ctx context.Context) error {
 	s.lock.Lock()
 	defer s.lock.Unlock()
 
-	// Wipe this map to be rebuilt in the fetch call below
+	// Wipe both directions so removed catalog rows cannot survive refresh.
+	s.SchemaManager.kindsByID = map[graph.Kind]int16{}
 	s.SchemaManager.kindIDsByKind = map[int16]graph.Kind{}
 	return s.SchemaManager.Fetch(ctx)
 }
 
 func (s *Driver) OptimizeStorage(ctx context.Context) error {
-	conn, err := s.pool.Acquire(ctx)
+	conn, err := s.SchemaManager.acquireGuarded(ctx, false)
 	if err != nil {
 		return fmt.Errorf("acquire connection for VACUUM: %w", err)
 	}
@@ -194,7 +289,7 @@ func (s *Driver) OptimizeStorage(ctx context.Context) error {
 // returns an error the transaction is rolled back and the graph is left untouched.
 func (s *Driver) WipeGraph(ctx context.Context, retain graph.TransactionDelegate) error {
 	return s.WriteTransaction(ctx, func(tx graph.Transaction) error {
-		result := tx.Raw("truncate table node, edge;", nil)
+		result := tx.Raw("select public.dawgs_wipe_graph();", nil)
 
 		// Close before issuing further statements: a pgx transaction shares a single connection and cannot run the
 		// retain delegate's queries while these rows remain open.
@@ -227,13 +322,12 @@ func (s *Driver) resolveKindIDs(ctx context.Context, kinds graph.Kinds) ([]int16
 	}
 	s.lock.RUnlock()
 
-	s.lock.Lock()
-	defer s.lock.Unlock()
-
 	if err := s.Fetch(ctx); err != nil {
 		return nil, nil, err
 	}
 
+	s.lock.RLock()
+	defer s.lock.RUnlock()
 	kindIDs, missingKinds := s.mapKinds(kinds)
 	return kindIDs, missingKinds, nil
 }
@@ -287,7 +381,7 @@ func buildNodeDeleteStatement(includeRequested bool, includeIDs []int16, exclude
 		predicates = append(predicates, fmt.Sprintf("not (kind_ids operator (pg_catalog.&&) $%d::int2[])", len(arguments)))
 	}
 
-	statement := "delete from node"
+	statement := "delete from public.node"
 	if len(predicates) > 0 {
 		statement += " where " + strings.Join(predicates, " and ")
 	}
@@ -311,7 +405,7 @@ func (s *Driver) DeleteRelationshipsByKinds(ctx context.Context, kinds graph.Kin
 		return err
 	}
 
-	const statement = "delete from edge where kind_id = any($1::int2[])"
+	const statement = "delete from public.edge where kind_id = any($1::int2[])"
 
 	return s.execDelete(ctx, "relationship", statement, kindIDs)
 }
@@ -320,7 +414,7 @@ func (s *Driver) DeleteRelationshipsByKinds(ctx context.Context, kinds graph.Kin
 // names the delete for the acquire error message; statement and arguments are passed through unchanged so each caller
 // preserves its own SQL, positional arguments, and statement error wrapping.
 func (s *Driver) execDelete(ctx context.Context, label, statement string, arguments ...any) error {
-	conn, err := s.pool.Acquire(ctx)
+	conn, err := s.SchemaManager.acquireGuarded(ctx, false)
 	if err != nil {
 		return fmt.Errorf("acquire connection for %s delete: %w", label, err)
 	}

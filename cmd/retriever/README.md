@@ -80,6 +80,13 @@ kind-shape histograms, and a canonical SHA-256 fingerprint. They intentionally
 exclude IDs, property keys, property values, source identifiers, examples, and
 sampled paths.
 
+PostgreSQL transition dumps also bind a checksummed `source.postgres` section
+containing layout/state, topology fingerprint, graph/kind/leaf counts,
+database identity and epoch, owner/target/smoke facts, and PostgreSQL server
+version. The hidden resume checkpoint binds the same checksum, so a topology
+or incarnation change refuses resume. This transition exporter is V2-only;
+the final V1-compatible exporter remains a separately retained artifact.
+
 Rows inserted after the initial graph count are ignored once the counted entity
 total has been scanned. Deletes or other concurrent source mutations can still
 make the final dumped counts differ from the initial counts, in which case dump

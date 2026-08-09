@@ -9,6 +9,10 @@ BENCH_TIME ?= 1s
 BENCH_BASE ?= main
 BENCH_TARGET ?= HEAD
 BENCH_KIND ?= all
+TEST_TAGS ?=
+MIGRATOR_VERSION ?= 2.0.0-dev
+SOURCE_REVISION ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
+MIGRATOR_DIST ?= dist
 
 # Main packages to test/build
 MAIN_PACKAGES := $(shell $(GO_CMD) list ./...)
@@ -56,7 +60,7 @@ QUALITY_INPUTS += -mutation-report $(MUTATION_REPORT)
 endif
 QUALITY_INPUTS += -benchmark-regression $(BENCHMARK_REGRESSION)
 
-.PHONY: default all build deps tidy lint format test test_all test_integration test_neo4j test_pg test_update plan_corpus complexity complexity_check crap crap_check quality quality_check quality_backend quality_bench metrics metrics_check generate clean help
+.PHONY: default all build build_pg_migrate migration_artifact migration_preflight_fixture verify_frozen_v1_client benchmark_transition deps tidy lint format test test_all test_integration test_integration_pg_temp prepare_test_pg test_postgres_harness test_transition_containment test_migration test_bootstrap test_restore test_restore_independent test_rollback test_pg_physical test_neo4j test_pg test_update plan_corpus complexity complexity_check crap crap_check quality quality_check quality_backend quality_bench metrics metrics_check generate clean help
 
 # Default target
 default: help
@@ -66,6 +70,27 @@ all: generate format tidy test
 build:
 	@echo "Building all packages..."
 	@$(GO_CMD) build ./...
+
+build_pg_migrate:
+	@mkdir -p bin
+	@CGO_ENABLED=0 $(GO_CMD) build -trimpath -buildvcs=false \
+		-ldflags "-X main.version=$(MIGRATOR_VERSION) -X main.sourceRevision=$(SOURCE_REVISION)" \
+		-o bin/dawgs-pg-migrate ./cmd/pgmigrate
+
+migration_artifact:
+	@./scripts/build-migration-artifact '$(MIGRATOR_DIST)' '$(MIGRATOR_VERSION)' '$(SOURCE_REVISION)'
+
+migration_preflight_fixture:
+	@sha256sum -c drivers/pg/migrate/testdata/v1_schema.sql.sha256
+	@jq empty docs/schemas/fleet-ledger-v1.schema.json
+	@jq empty docs/schemas/archive-manifest-v1.schema.json
+	@$(GO_CMD) test ./drivers/pg/migrate ./cmd/pgmigrate
+
+verify_frozen_v1_client:
+	@./scripts/verify-frozen-v1-client '$(MIGRATOR_DIST)'
+
+benchmark_transition:
+	@$(MAKE) test_bench BENCH_COUNT=$(BENCH_COUNT) BENCH_TIME=$(BENCH_TIME)
 
 # Dependency management
 deps:
@@ -88,7 +113,7 @@ format:
 # Test targets
 test: $(METRICS_DIR)
 	@echo "Running tests..."
-	@$(GO_CMD) test -race -covermode=atomic -coverprofile=$(COVERAGE_PROFILE) -coverpkg=$(COVERPKG) -count=1 -parallel=10 $(MAIN_PACKAGES)
+	@$(GO_CMD) test $(if $(strip $(TEST_TAGS)),-tags '$(TEST_TAGS)') -race -covermode=atomic -coverprofile=$(COVERAGE_PROFILE) -coverpkg=$(COVERPKG) -count=1 -parallel=10 $(MAIN_PACKAGES)
 	@$(GO_CMD) tool cover -func=$(COVERAGE_PROFILE) > $(COVERAGE_FUNC_REPORT)
 	@echo "Coverage report written to $(COVERAGE_FUNC_REPORT)"
 
@@ -96,7 +121,42 @@ test_all: test test_integration
 
 test_integration:
 	@echo "Running all integration tests..."
-	@$(GO_CMD) test -tags 'manual_integration integration' -race -cover -count=1 -p=1 -parallel=1 $(MAIN_PACKAGES)
+	@$(GO_CMD) test -tags 'manual_integration integration $(TEST_TAGS)' -race -cover -count=1 -p=1 -parallel=1 $(MAIN_PACKAGES)
+
+test_integration_pg_temp:
+	@./scripts/test-postgres run -- $(MAKE) test_integration TEST_TAGS=dawgs_rehearsal
+
+TEST_PG_COMMAND ?= $(MAKE) test_pg_physical
+prepare_test_pg:
+	@./scripts/test-postgres run -- ./scripts/prepare-test-pg -- $(TEST_PG_COMMAND)
+
+test_postgres_harness:
+	@$(GO_CMD) test -tags pg_harness -race -count=1 ./scripts
+
+test_transition_containment:
+	@$(GO_CMD) test -tags transition_containment -race -count=1 ./drivers/pg
+
+test_migration:
+	@$(GO_CMD) test -tags migration_integration -race -count=1 ./drivers/pg/migrate
+
+test_bootstrap:
+	@$(GO_CMD) test -tags bootstrap_integration -race -count=1 ./drivers/pg/migrate
+
+test_restore:
+	@$(GO_CMD) test -tags restore_integration -race -count=1 ./drivers/pg/migrate
+
+test_restore_independent:
+	@if [ -n "$${PG_TEST_RESTORE_SOURCE_ADMIN:-}" ] && [ -n "$${PG_TEST_RESTORE_TARGET_ADMIN:-}" ]; then \
+		$(GO_CMD) test -tags independent_restore_integration -race -count=1 ./drivers/pg/migrate; \
+	else \
+		./scripts/test-independent-restore; \
+	fi
+
+test_rollback:
+	@$(GO_CMD) test -tags rollback_integration -race -count=1 ./drivers/pg/migrate
+
+test_pg_physical:
+	@$(GO_CMD) test -tags pg_physical -run '^TestPGPhysical' -race -count=1 -p=1 ./drivers/pg/... ./integration/...
 
 test_bench:
 	@echo "Running benchmarks..."
@@ -211,6 +271,17 @@ clean:
 	@rm -rf cypher/analyzer/updated_cases/
 	@rm -rf cypher/models/pgsql/test/updated_cases
 	@rm -rf $(METRICS_DIR)
+	@rm -f bin/dawgs-pg-migrate \
+		$(MIGRATOR_DIST)/dawgs-pg-migrate \
+		$(MIGRATOR_DIST)/dawgs-pg-migrate.sha256 \
+		$(MIGRATOR_DIST)/dawgs-pg-migrate.metadata.txt \
+		$(MIGRATOR_DIST)/dawgs-pg-migrate.inputs.sha256 \
+		$(MIGRATOR_DIST)/dawgs-pg-migrate.publication.sha256 \
+		$(MIGRATOR_DIST)/archive-policy.md \
+		$(MIGRATOR_DIST)/dawgs-v1-export \
+		$(MIGRATOR_DIST)/dawgs-v1-export.sha256 \
+		$(MIGRATOR_DIST)/dawgs-v1-export.metadata.txt
+	@rmdir bin $(MIGRATOR_DIST) 2>/dev/null || true
 
 help:
 	@echo "Available targets:"
@@ -219,6 +290,9 @@ help:
 	@echo ""
 	@echo "Build:"
 	@echo "  build       - Build all packages"
+	@echo "  build_pg_migrate - Build the contained PostgreSQL migrator"
+	@echo "  migration_artifact - Reproducibly build and verify the static migrator artifact"
+	@echo "  verify_frozen_v1_client - Build and checksum the pinned static V1 preparation client"
 	@echo ""
 	@echo "Dependencies:"
 	@echo "  deps        - Download dependencies"
@@ -233,6 +307,18 @@ help:
 	@echo "  test        - Run all unit tests with coverage"
 	@echo "  test_all    - Run all tests including integration tests"
 	@echo "  test_integration - Run all integration tests"
+	@echo "  test_integration_pg_temp - Run integration tests in an ephemeral PostgreSQL cluster"
+	@echo "  prepare_test_pg - Run a selected PostgreSQL suite in the disposable role harness"
+	@echo "  test_postgres_harness - Test disposable PostgreSQL lifecycle safety"
+	@echo "  test_transition_containment - Prove an empty PostgreSQL database is refused without mutation"
+	@echo "  test_migration - Run the frozen-V1 migration and failure-injection suite"
+	@echo "  test_bootstrap - Run the restricted bootstrap/owner-handoff suite"
+	@echo "  test_restore - Run accepted database restore/rebind and fresh-smoke tests"
+	@echo "  test_restore_independent - Run accepted restore/rebind across two independent clusters"
+	@echo "  test_rollback - Run full cutover rollback and V1 preparation handoff"
+	@echo "  test_pg_physical - Run destructive PostgreSQL topology/registry tests"
+	@echo "  migration_preflight_fixture - Verify frozen V1 and strict evidence fixtures"
+	@echo "  benchmark_transition - Run the transition benchmark capture"
 	@echo "  test_bench  - Run benchmark test"
 	@echo "  bench_diff  - Compare benchmarks between commits"
 	@echo "  test_neo4j  - Run Neo4j integration tests"

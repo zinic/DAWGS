@@ -24,7 +24,8 @@ const (
 
 func AfterPooledConnectionEstablished(ctx context.Context, conn *pgx.Conn) error {
 	for _, dataType := range pgsql.CompositeTypes {
-		if definition, err := conn.LoadType(ctx, dataType.String()); err != nil {
+		qualifiedName := "public." + dataType.String()
+		if definition, err := conn.LoadType(ctx, qualifiedName); err != nil {
 			if !StateObjectDoesNotExist.ErrorMatches(err) {
 				return fmt.Errorf("failed to match composite type %s to database: %w", dataType, err)
 			}
@@ -38,7 +39,7 @@ func AfterPooledConnectionEstablished(ctx context.Context, conn *pgx.Conn) error
 
 func AfterPooledConnectionRelease(conn *pgx.Conn) bool {
 	for _, dataType := range pgsql.CompositeTypes {
-		if _, hasType := conn.TypeMap().TypeForName(dataType.String()); !hasType {
+		if _, hasType := conn.TypeMap().TypeForName("public." + dataType.String()); !hasType {
 			// This connection should be destroyed since it does not contain information regarding the schema's
 			// composite types
 			slog.Warn(fmt.Sprintf("Unable to find expected data type: %s. This database connection will not be pooled.", dataType))
@@ -61,8 +62,22 @@ func NewPool(poolCfg *pgxpool.Config) (*pgxpool.Pool, error) {
 	// Bind functions to the AfterConnect and AfterRelease hooks to ensure that composite type registration occurs.
 	// Without composite type registration, the pgx connection type will not be able to marshal PG OIDs to their
 	// respective Golang structs.
-	poolCfg.AfterConnect = AfterPooledConnectionEstablished
-	poolCfg.AfterRelease = AfterPooledConnectionRelease
+	callerAfterConnect := poolCfg.AfterConnect
+	callerAfterRelease := poolCfg.AfterRelease
+	poolCfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
+		if callerAfterConnect != nil {
+			if err := callerAfterConnect(ctx, conn); err != nil {
+				return err
+			}
+		}
+		return AfterPooledConnectionEstablished(ctx, conn)
+	}
+	poolCfg.AfterRelease = func(conn *pgx.Conn) bool {
+		if callerAfterRelease != nil && !callerAfterRelease(conn) {
+			return false
+		}
+		return AfterPooledConnectionRelease(conn)
+	}
 
 	pool, err := pgxpool.NewWithConfig(poolCtx, poolCfg)
 	if err != nil {

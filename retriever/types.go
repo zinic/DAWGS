@@ -1,10 +1,14 @@
 package retriever
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"time"
 
+	"github.com/specterops/dawgs/drivers/pg"
 	"github.com/specterops/dawgs/graph"
 )
 
@@ -53,7 +57,9 @@ type Manifest struct {
 }
 
 type SourceMetadata struct {
-	GraphCount int `json:"graph_count"`
+	GraphCount     int              `json:"graph_count"`
+	Postgres       *pg.LayoutHealth `json:"postgres,omitempty"`
+	PostgresSHA256 string           `json:"postgres_sha256,omitempty"`
 }
 
 type ScrubMetadata struct {
@@ -144,6 +150,20 @@ func (s Manifest) validate() error {
 	if s.Source.GraphCount != len(s.Graphs) {
 		return fmt.Errorf("manifest graph_count %d does not match %d graph entries", s.Source.GraphCount, len(s.Graphs))
 	}
+	if s.Source.Postgres == nil {
+		if s.Source.PostgresSHA256 != "" {
+			return fmt.Errorf("manifest has postgres_sha256 without PostgreSQL source metadata")
+		}
+	} else {
+		if s.Source.PostgresSHA256 == "" {
+			return fmt.Errorf("manifest PostgreSQL source metadata is missing postgres_sha256")
+		}
+		if actual, err := postgresMetadataSHA256(*s.Source.Postgres); err != nil {
+			return err
+		} else if actual != s.Source.PostgresSHA256 {
+			return fmt.Errorf("manifest PostgreSQL source metadata sha256 mismatch: manifest has %s, computed %s", s.Source.PostgresSHA256, actual)
+		}
+	}
 
 	seenGraphs := map[string]struct{}{}
 	for _, graphEntry := range s.Graphs {
@@ -210,6 +230,15 @@ func (s Manifest) validate() error {
 	}
 
 	return nil
+}
+
+func postgresMetadataSHA256(value pg.LayoutHealth) (string, error) {
+	payload, err := json.Marshal(value)
+	if err != nil {
+		return "", fmt.Errorf("encode PostgreSQL source metadata: %w", err)
+	}
+	digest := sha256.Sum256(payload)
+	return hex.EncodeToString(digest[:]), nil
 }
 
 func (s Manifest) Validate() error {

@@ -12,7 +12,7 @@ import (
 )
 
 func Translated(translation Result) (string, error) {
-	return format.Statement(translation.Statement, format.NewOutputBuilder())
+	return format.Statement(translation.Statement, format.NewOutputBuilder().WithGraphScope(translation.GraphID))
 }
 
 // postgres comments can be terminated by \r, \n, or both per the source:
@@ -24,6 +24,18 @@ var newlineToCommentReplacer = strings.NewReplacer(
 )
 
 func FromCypher(ctx context.Context, regularQuery *cypher.RegularQuery, kindMapper pgsql.KindMapper, stripLiterals bool, graphID int32) (format.Formatted, error) {
+	result, err := FromCypherResult(ctx, regularQuery, kindMapper, stripLiterals, graphID)
+	return result.Formatted, err
+}
+
+type FormattedResult struct {
+	format.Formatted
+	GraphID             int32
+	HasMutations        bool
+	RequiredEdgeKindIDs []int16
+}
+
+func FromCypherResult(ctx context.Context, regularQuery *cypher.RegularQuery, kindMapper pgsql.KindMapper, stripLiterals bool, graphID int32) (FormattedResult, error) {
 	var (
 		output  = &bytes.Buffer{}
 		emitter = cypherFormat.NewCypherEmitter(stripLiterals)
@@ -32,7 +44,7 @@ func FromCypher(ctx context.Context, regularQuery *cypher.RegularQuery, kindMapp
 	// 1. write cypher to output
 
 	if err := emitter.Write(regularQuery, output); err != nil {
-		return format.Formatted{}, err
+		return FormattedResult{}, err
 	}
 
 	// 2. save copy of cypher and reset output for commented cypher
@@ -44,7 +56,7 @@ func FromCypher(ctx context.Context, regularQuery *cypher.RegularQuery, kindMapp
 
 	output.WriteString("-- ") // opening comment
 	if _, err := newlineToCommentReplacer.WriteString(output, raw); err != nil {
-		return format.Formatted{}, err
+		return FormattedResult{}, err
 	}
 
 	// 4. continue with SQL
@@ -52,15 +64,16 @@ func FromCypher(ctx context.Context, regularQuery *cypher.RegularQuery, kindMapp
 	output.WriteString("\n")
 
 	if translation, err := Translate(ctx, regularQuery, kindMapper, nil, graphID); err != nil {
-		return format.Formatted{}, err
-	} else if sqlQuery, err := format.Statement(translation.Statement, format.NewOutputBuilder()); err != nil {
-		return format.Formatted{}, err
+		return FormattedResult{}, err
+	} else if sqlQuery, err := format.Statement(translation.Statement, format.NewOutputBuilder().WithGraphScope(translation.GraphID)); err != nil {
+		return FormattedResult{}, err
 	} else {
 		output.WriteString(sqlQuery)
 
-		return format.Formatted{
-			Statement:  output.String(),
-			Parameters: translation.Parameters,
+		return FormattedResult{
+			Formatted: format.Formatted{Statement: output.String(), Parameters: translation.Parameters},
+			GraphID:   translation.GraphID, HasMutations: translation.HasMutations,
+			RequiredEdgeKindIDs: translation.RequiredEdgeKindIDs,
 		}, nil
 	}
 }

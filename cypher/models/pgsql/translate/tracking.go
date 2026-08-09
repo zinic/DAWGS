@@ -383,6 +383,7 @@ type BoundIdentifier struct {
 	Parameter      *pgsql.Parameter
 	LastProjection *Frame
 	Dependencies   []*BoundIdentifier
+	KnownKindIDs   []int16
 	DataType       pgsql.DataType
 }
 
@@ -393,6 +394,7 @@ func (s *BoundIdentifier) MaterializedBy(frame *Frame) {
 func (s *BoundIdentifier) Copy() *BoundIdentifier {
 	dependenciesCopy := make([]*BoundIdentifier, len(s.Dependencies))
 	copy(dependenciesCopy, s.Dependencies)
+	knownKindIDsCopy := append([]int16(nil), s.KnownKindIDs...)
 
 	return &BoundIdentifier{
 		Identifier:     s.Identifier,
@@ -400,6 +402,7 @@ func (s *BoundIdentifier) Copy() *BoundIdentifier {
 		Parameter:      s.Parameter,
 		LastProjection: s.LastProjection,
 		Dependencies:   dependenciesCopy,
+		KnownKindIDs:   knownKindIDsCopy,
 		DataType:       s.DataType,
 	}
 }

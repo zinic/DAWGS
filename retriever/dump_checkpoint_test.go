@@ -213,7 +213,7 @@ func TestDumpResumesFromLastCommittedFragment(t *testing.T) {
 func TestDumpResumeRejectsIncompatibleIdentityAndUnexpectedFiles(t *testing.T) {
 	outputDir := t.TempDir()
 	options := DefaultDumpOptions(outputDir)
-	identity, err := newDumpCheckpointIdentity("test", []GraphTarget{{Name: "default"}}, options, nil)
+	identity, err := newDumpCheckpointIdentity("test", []GraphTarget{{Name: "default"}}, options, nil, SourceMetadata{GraphCount: 1})
 	if err != nil {
 		t.Fatalf("checkpoint identity: %v", err)
 	}

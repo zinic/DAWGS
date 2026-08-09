@@ -210,7 +210,7 @@ func TestOptimizerSafetyCountStoreFastPathUsesBaseNodeCount(t *testing.T) {
 	requirePlannedOptimizationLowering(t, translation.Optimization, optimize.LoweringCountStoreFastPath)
 	requireOptimizationLowering(t, translation.Optimization, optimize.LoweringCountStoreFastPath)
 	require.Empty(t, translation.Optimization.SkippedLowerings)
-	require.Equal(t, "select count(*)::int8 from node n0;", strings.Join(strings.Fields(formattedQuery), " "))
+	require.Equal(t, "select count(*)::int8 from public.node_0 n0;", strings.Join(strings.Fields(formattedQuery), " "))
 }
 
 func TestOptimizerSafetyCountStoreFastPathKeepsKindConstraintAndAlias(t *testing.T) {
@@ -222,7 +222,7 @@ func TestOptimizerSafetyCountStoreFastPathKeepsKindConstraintAndAlias(t *testing
 
 	requirePlannedOptimizationLowering(t, translation.Optimization, optimize.LoweringCountStoreFastPath)
 	requireOptimizationLowering(t, translation.Optimization, optimize.LoweringCountStoreFastPath)
-	require.Equal(t, "select count(*)::int8 as total from node n0 where n0.kind_ids operator (pg_catalog.@>) array [8]::int2[];", strings.Join(strings.Fields(formattedQuery), " "))
+	require.Equal(t, "select count(*)::int8 as total from public.node_0 n0 where n0.kind_ids operator (pg_catalog.@>) array [8]::int2[];", strings.Join(strings.Fields(formattedQuery), " "))
 }
 
 func TestOptimizerSafetyCountStoreFastPathSupportsNodeCountStar(t *testing.T) {
@@ -234,7 +234,7 @@ func TestOptimizerSafetyCountStoreFastPathSupportsNodeCountStar(t *testing.T) {
 
 	requirePlannedOptimizationLowering(t, translation.Optimization, optimize.LoweringCountStoreFastPath)
 	requireOptimizationLowering(t, translation.Optimization, optimize.LoweringCountStoreFastPath)
-	require.Equal(t, "select count(*)::int8 as total from node n0 where n0.kind_ids operator (pg_catalog.@>) array [8]::int2[];", strings.Join(strings.Fields(formattedQuery), " "))
+	require.Equal(t, "select count(*)::int8 as total from public.node_0 n0 where n0.kind_ids operator (pg_catalog.@>) array [8]::int2[];", strings.Join(strings.Fields(formattedQuery), " "))
 }
 
 func TestOptimizerSafetyCountStoreFastPathUsesBaseEdgeCount(t *testing.T) {
@@ -247,7 +247,7 @@ func TestOptimizerSafetyCountStoreFastPathUsesBaseEdgeCount(t *testing.T) {
 	requirePlannedOptimizationLowering(t, translation.Optimization, optimize.LoweringCountStoreFastPath)
 	requireOptimizationLowering(t, translation.Optimization, optimize.LoweringCountStoreFastPath)
 	requireSkippedOptimizationLowering(t, translation.Optimization, optimize.LoweringProjectionPruning, "superseded by CountStoreFastPath")
-	require.Equal(t, "select count(*)::int8 from edge e0 join node n0 on n0.id = e0.start_id join node n1 on n1.id = e0.end_id where e0.kind_id = any (array [10]::int2[]);", strings.Join(strings.Fields(formattedQuery), " "))
+	require.Equal(t, "select count(*)::int8 from public.edge_0 e0 join public.node_0 n0 on n0.id = e0.start_id join public.node_0 n1 on n1.id = e0.end_id where e0.kind_id = any (array [10]::int2[]);", strings.Join(strings.Fields(formattedQuery), " "))
 }
 
 func TestOptimizerSafetyCountStoreFastPathUsesSparseEdgeKindCount(t *testing.T) {
@@ -263,7 +263,7 @@ func TestOptimizerSafetyCountStoreFastPathUsesSparseEdgeKindCount(t *testing.T) 
 	requireSkippedOptimizationLowering(t, translation.Optimization, optimize.LoweringProjectionPruning, "superseded by CountStoreFastPath")
 	require.NotContains(t, normalizedQuery, "with recursive")
 	require.NotContains(t, normalizedQuery, "ordered_edges_to_path")
-	require.Equal(t, "select count(*)::int8 from edge e0 join node n0 on n0.id = e0.start_id join node n1 on n1.id = e0.end_id where e0.kind_id = any (array [4]::int2[]);", normalizedQuery)
+	require.Equal(t, "select count(*)::int8 from public.edge_0 e0 join public.node_0 n0 on n0.id = e0.start_id join public.node_0 n1 on n1.id = e0.end_id where e0.kind_id = any (array [4]::int2[]);", normalizedQuery)
 }
 
 func TestOptimizerSafetyCountStoreFastPathUsesUntypedEdgeCount(t *testing.T) {
@@ -279,7 +279,7 @@ func TestOptimizerSafetyCountStoreFastPathUsesUntypedEdgeCount(t *testing.T) {
 	requireSkippedOptimizationLowering(t, translation.Optimization, optimize.LoweringProjectionPruning, "superseded by CountStoreFastPath")
 	require.NotContains(t, normalizedQuery, "with recursive")
 	require.NotContains(t, normalizedQuery, "ordered_edges_to_path")
-	require.Equal(t, "select count(*)::int8 from edge e0 join node n0 on n0.id = e0.start_id join node n1 on n1.id = e0.end_id;", normalizedQuery)
+	require.Equal(t, "select count(*)::int8 from public.edge_0 e0 join public.node_0 n0 on n0.id = e0.start_id join public.node_0 n1 on n1.id = e0.end_id;", normalizedQuery)
 }
 
 func TestOptimizerSafetyCountStoreFastPathSupportsEdgeCountStar(t *testing.T) {
@@ -292,7 +292,7 @@ func TestOptimizerSafetyCountStoreFastPathSupportsEdgeCountStar(t *testing.T) {
 	requirePlannedOptimizationLowering(t, translation.Optimization, optimize.LoweringCountStoreFastPath)
 	requireOptimizationLowering(t, translation.Optimization, optimize.LoweringCountStoreFastPath)
 	requireSkippedOptimizationLowering(t, translation.Optimization, optimize.LoweringProjectionPruning, "superseded by CountStoreFastPath")
-	require.Equal(t, "select count(*)::int8 from edge e0 join node n0 on n0.id = e0.start_id join node n1 on n1.id = e0.end_id where e0.kind_id = any (array [10]::int2[]);", strings.Join(strings.Fields(formattedQuery), " "))
+	require.Equal(t, "select count(*)::int8 from public.edge_0 e0 join public.node_0 n0 on n0.id = e0.start_id join public.node_0 n1 on n1.id = e0.end_id where e0.kind_id = any (array [10]::int2[]);", strings.Join(strings.Fields(formattedQuery), " "))
 }
 
 func TestOptimizerSafetyADCSQueryPrunesExpansionEdgeCarry(t *testing.T) {
@@ -320,15 +320,15 @@ func TestOptimizerSafetyADCSQueryPrunesExpansionEdgeCarry(t *testing.T) {
 	require.NotContains(t, normalizedQuery, "array [s12.e1]::edgecomposite[]")
 	require.Contains(t, normalizedQuery, "from s5, s7")
 	requireSQLContainsInOrder(t, normalizedQuery,
-		"where s7.satisfied and exists (select 1 from edge e5 join node n6",
+		"where s7.satisfied and exists (select 1 from public.edge_0 e5 join public.node_0 n6",
 		"properties -> 'authenticationenabled'",
-		"join edge e6 on n6.id = e6.start_id",
+		"join public.edge_0 e6 on n6.id = e6.start_id",
 		"e6.end_id = (s5.n2).id",
 		"and (s5.n0).id = s7.root_id",
 	)
 	requireSQLContainsInOrder(t, normalizedQuery,
 		"where s11.satisfied and (s9.n2).id = s11.root_id and exists",
-		"from edge e8 where n7.id = e8.start_id",
+		"from public.edge_0 e8 where n7.id = e8.start_id",
 		"e8.end_id = (s9.n4).id",
 	)
 }
@@ -426,7 +426,7 @@ RETURN p
 
 	require.Contains(t, normalizedQuery, "(s1.n0).id = e0.start_id")
 	require.Contains(t, normalizedQuery, "(s1.n1).id = e0.end_id")
-	require.NotContains(t, normalizedQuery, "join node")
+	require.NotContains(t, normalizedQuery, "join public.node_0")
 	require.NotNil(t, translation.Optimization.LoweringPlan)
 	require.NotEmpty(t, translation.Optimization.LoweringPlan.ExpandInto)
 	requirePlannedOptimizationLowering(t, translation.Optimization, "ExpandIntoDetection")
@@ -444,7 +444,7 @@ func TestOptimizerSafetyReordersIndependentNodeAnchor(t *testing.T) {
 		RETURN p
 		`)
 		enterpriseAnchorIndex = strings.Index(normalizedQuery, "array [5]::int2[]")
-		broadScanIndex        = strings.Index(normalizedQuery, "from s0, node n1")
+		broadScanIndex        = strings.Index(normalizedQuery, "from s0, public.node_0 n1")
 	)
 
 	require.NotEqual(t, -1, enterpriseAnchorIndex)
@@ -462,7 +462,7 @@ MATCH p = (n:Group)-[:MemberOf*1..]->(m)-[:Enroll]->(ca:EnterpriseCA)
 RETURN p
 `)
 
-	require.Contains(t, normalizedQuery, "exists (select 1 from edge e1 join node n2")
+	require.Contains(t, normalizedQuery, "exists (select 1 from public.edge_0 e1 join public.node_0 n2")
 	require.Contains(t, normalizedQuery, "n1.id = e1.start_id")
 	require.Contains(t, normalizedQuery, "e1.kind_id = any (array [4]::int2[])")
 	require.Contains(t, normalizedQuery, "n2.kind_ids operator (pg_catalog.@>) array [5]::int2[]")
@@ -478,7 +478,7 @@ RETURN p
 `)
 
 	requireSQLContainsInOrder(t, normalizedQuery,
-		"exists (select 1 from edge e1 join node n2",
+		"exists (select 1 from public.edge_0 e1 join public.node_0 n2",
 		"properties -> 'name'",
 		"where n1.id = e1.start_id",
 	)
@@ -501,7 +501,7 @@ RETURN p
 	requireOptimizationLowering(t, translation.Optimization, optimize.LoweringPredicatePlacement)
 	requireNoSkippedOptimizationLowering(t, translation.Optimization, optimize.LoweringPredicatePlacement)
 	requireSQLContainsInOrder(t, normalizedQuery,
-		"select n0.id as root_id from node n0 where",
+		"select n0.id as root_id from public.node_0 n0 where",
 		"properties -> 'name'",
 	)
 }
@@ -523,9 +523,9 @@ RETURN dst
 	requireOptimizationLowering(t, translation.Optimization, optimize.LoweringPredicatePlacement)
 	requireNoSkippedOptimizationLowering(t, translation.Optimization, optimize.LoweringPredicatePlacement)
 	requireSQLContainsInOrder(t, normalizedQuery,
-		"join node n0 on",
+		"join public.node_0 n0 on",
 		"properties -> 'name'",
-		"join node n1",
+		"join public.node_0 n1",
 	)
 }
 
@@ -542,7 +542,7 @@ RETURN s
 	require.NoError(t, err)
 	normalizedQuery := strings.Join(strings.Fields(formattedQuery), " ")
 
-	require.Contains(t, normalizedQuery, "not exists (select 1 from edge e0")
+	require.Contains(t, normalizedQuery, "not exists (select 1 from public.edge_0 e0")
 	requirePlannedOptimizationLowering(t, translation.Optimization, "PredicatePlacement")
 	requireOptimizationLowering(t, translation.Optimization, "PredicatePlacement")
 }
@@ -596,7 +596,7 @@ RETURN p
 	requireOptimizationLowering(t, translation.Optimization, "TraversalDirectionSelection")
 	require.Contains(t, normalizedQuery, "jsonb_typeof((n1.properties -> 'name')) = 'string'")
 	require.Contains(t, normalizedQuery, "(n1.properties ->> 'name') = 'target'")
-	require.Contains(t, normalizedQuery, "join edge e0 on e0.end_id = s1_seed.root_id")
+	require.Contains(t, normalizedQuery, "join public.edge_0 e0 on e0.end_id = s1_seed.root_id")
 }
 
 func TestOptimizerSafetyExactOneHopRangeUsesFixedTraversal(t *testing.T) {
@@ -617,8 +617,8 @@ RETURN p
 	requireOptimizationLowering(t, translation.Optimization, optimize.LoweringLatePathMaterialization)
 	require.NotContains(t, normalizedQuery, "with recursive")
 	require.NotContains(t, normalizedQuery, "_seed")
-	require.Contains(t, normalizedQuery, "from edge e0 join node n0")
-	require.Contains(t, normalizedQuery, "join node n1")
+	require.Contains(t, normalizedQuery, "from public.edge_0 e0 join public.node_0 n0")
+	require.Contains(t, normalizedQuery, "join public.node_0 n1")
 }
 
 func TestOptimizerSafetyExactTwoHopRangeUsesFixedTraversal(t *testing.T) {
@@ -637,8 +637,8 @@ RETURN p
 	requireOptimizationLowering(t, translation.Optimization, optimize.LoweringExactRangeExpansion)
 	require.NotContains(t, normalizedQuery, "with recursive")
 	require.NotContains(t, normalizedQuery, "_seed")
-	require.Contains(t, normalizedQuery, "from edge e0")
-	require.Contains(t, normalizedQuery, "join edge e1")
+	require.Contains(t, normalizedQuery, "from public.edge_0 e0")
+	require.Contains(t, normalizedQuery, "join public.edge_0 e1")
 	require.Contains(t, normalizedQuery, "e1.id !=")
 	require.Contains(t, normalizedQuery, "array [")
 }
@@ -688,7 +688,7 @@ RETURN p
 	requireNoSkippedOptimizationLowering(t, translation.Optimization, optimize.LoweringExactRangeExpansion)
 	require.NotContains(t, normalizedQuery, "with recursive")
 	require.NotContains(t, normalizedQuery, "_seed")
-	require.Contains(t, normalizedQuery, "join edge e2")
+	require.Contains(t, normalizedQuery, "join public.edge_0 e2")
 }
 
 func TestOptimizerSafetyExactRangePrefixPreservesSuffixPushdownTargets(t *testing.T) {
@@ -720,7 +720,7 @@ RETURN p
 
 	requirePlannedOptimizationLowering(t, translation.Optimization, optimize.LoweringPathRelationshipPredicate)
 	requireOptimizationLowering(t, translation.Optimization, optimize.LoweringPathRelationshipPredicate)
-	require.Contains(t, normalizedQuery, "exists (select 1 from edge i0 where")
+	require.Contains(t, normalizedQuery, "exists (select 1 from public.edge_0 i0 where")
 	require.Contains(t, normalizedQuery, "i0.id = any (s0.ep0)")
 	require.Contains(t, normalizedQuery, "kind_name(i0.kind_id)::text like 'member%'")
 	require.NotContains(t, normalizedQuery, "select count(*)::int from unnest")
@@ -741,7 +741,7 @@ RETURN p
 
 	requirePlannedOptimizationLowering(t, translation.Optimization, optimize.LoweringPathRelationshipPredicate)
 	requireOptimizationLowering(t, translation.Optimization, optimize.LoweringPathRelationshipPredicate)
-	require.Contains(t, normalizedQuery, "not exists (select 1 from edge i0 where")
+	require.Contains(t, normalizedQuery, "not exists (select 1 from public.edge_0 i0 where")
 	require.Contains(t, normalizedQuery, "i0.id = any (s0.ep0)")
 	require.Contains(t, normalizedQuery, "s0.ep0 is not null")
 	require.NotContains(t, normalizedQuery, "select count(*)::int from unnest")
@@ -776,13 +776,13 @@ LIMIT 100
 	require.Contains(t, lowerQuery, "terminal_nodes(id) as materialized")
 	require.Contains(t, lowerQuery, "terminal_hits(root_id)")
 	require.Contains(t, lowerQuery, "ranked(root_id, admincount)")
-	require.Contains(t, lowerQuery, "join edge e on e.start_id = candidate_sources.root_id")
+	require.Contains(t, lowerQuery, "join public.edge_0 e on e.start_id = candidate_sources.root_id")
 	require.Contains(t, lowerQuery, "e.start_id = traversal.next_id")
 	require.Contains(t, lowerQuery, "e.id != all (traversal.path)")
 	require.Contains(t, lowerQuery, "join terminal_nodes on terminal_nodes.id = traversal.next_id")
 	require.Contains(t, lowerQuery, "count(*)::int8 as admincount")
 	require.Contains(t, lowerQuery, "group by terminal_hits.root_id")
-	require.Contains(t, lowerQuery, "from ranked join node source_node on source_node.id = ranked.root_id")
+	require.Contains(t, lowerQuery, "from ranked join public.node_0 source_node on source_node.id = ranked.root_id")
 	require.NotContains(t, lowerQuery, "group by (")
 	require.NotContains(t, lowerQuery, "::nodecomposite as n0 from")
 }
@@ -894,7 +894,7 @@ LIMIT 100
 	normalizedQuery := strings.Join(strings.Fields(strings.ToLower(formattedQuery)), " ")
 
 	requireOptimizationLowering(t, translation.Optimization, optimize.LoweringAggregateTraversalCount)
-	require.Contains(t, normalizedQuery, "join edge e on e.end_id = candidate_sources.root_id")
+	require.Contains(t, normalizedQuery, "join public.edge_0 e on e.end_id = candidate_sources.root_id")
 	require.Contains(t, normalizedQuery, "e.end_id = traversal.next_id")
 }
 
@@ -1287,7 +1287,7 @@ MATCH p = (n:Group)-[:MemberOf*0..]->(m)-[:Enroll]->(ca:EnterpriseCA)
 RETURN p
 `)
 
-	require.Contains(t, normalizedQuery, "exists (select 1 from edge e1 join node n2")
+	require.Contains(t, normalizedQuery, "exists (select 1 from public.edge_0 e1 join public.node_0 n2")
 	require.Contains(t, normalizedQuery, "n1.id = e1.start_id")
 	require.Contains(t, normalizedQuery, "e1.kind_id = any (array [4]::int2[])")
 	require.Contains(t, normalizedQuery, "n2.kind_ids operator (pg_catalog.@>) array [5]::int2[]")
@@ -1303,17 +1303,17 @@ WHERE ct.authenticationenabled = true
 RETURN p
 `)
 
-	require.Contains(t, normalizedQuery, "exists (select 1 from edge e1 join node n3")
-	require.Contains(t, normalizedQuery, "join edge e2 on n3.id = e2.start_id")
+	require.Contains(t, normalizedQuery, "exists (select 1 from public.edge_0 e1 join public.node_0 n3")
+	require.Contains(t, normalizedQuery, "join public.edge_0 e2 on n3.id = e2.start_id")
 	require.Contains(t, normalizedQuery, "n2.id = e1.start_id")
 	require.Contains(t, normalizedQuery, "e1.kind_id = any")
 	require.Contains(t, normalizedQuery, "n3.kind_ids operator (pg_catalog.@>)")
 	require.Contains(t, normalizedQuery, "e2.kind_id = any")
 	require.Contains(t, normalizedQuery, "e2.end_id = (s0.n0).id")
 	requireSQLContainsInOrder(t, normalizedQuery,
-		"exists (select 1 from edge e1 join node n3",
+		"exists (select 1 from public.edge_0 e1 join public.node_0 n3",
 		"properties -> 'authenticationenabled'",
-		"join edge e2 on n3.id = e2.start_id",
+		"join public.edge_0 e2 on n3.id = e2.start_id",
 		"e2.end_id = (s0.n0).id",
 	)
 }
@@ -1333,8 +1333,8 @@ RETURN p
 	requirePlannedOptimizationLowering(t, translation.Optimization, "ExpansionSuffixPushdown")
 	requireOptimizationLowering(t, translation.Optimization, "ExpansionSuffixPushdown")
 	requireSQLContainsInOrder(t, normalizedQuery,
-		"exists (select 1 from edge e1 join node n3",
-		"join edge e2 on n3.id = e2.start_id",
+		"exists (select 1 from public.edge_0 e1 join public.node_0 n3",
+		"join public.edge_0 e2 on n3.id = e2.start_id",
 		"e2.end_id = (s0.n0).id",
 	)
 	require.Contains(t, normalizedQuery, "(s0.n0).kind_ids operator (pg_catalog.@>)")
@@ -1349,7 +1349,7 @@ MATCH p = (ca:EnterpriseCA)-[:IssuedSignedBy|EnterpriseCAFor*1..]->(root:RootCA)
 RETURN p
 `)
 
-	require.Contains(t, normalizedQuery, "exists (select 1 from edge e1")
+	require.Contains(t, normalizedQuery, "exists (select 1 from public.edge_0 e1")
 	require.Contains(t, normalizedQuery, "e1.kind_id = any")
 	require.Contains(t, normalizedQuery, "n2.kind_ids operator (pg_catalog.@>)")
 	require.Contains(t, normalizedQuery, "n2.id = e1.start_id")
@@ -1364,7 +1364,7 @@ MATCH p = (ca:EnterpriseCA)<-[:PublishedTo*1..]-(ct)<-[:Enroll]-(m:Group)
 RETURN p
 `)
 
-	require.Contains(t, normalizedQuery, "exists (select 1 from edge e1 join node n2")
+	require.Contains(t, normalizedQuery, "exists (select 1 from public.edge_0 e1 join public.node_0 n2")
 	require.Contains(t, normalizedQuery, "n1.id = e1.end_id")
 	require.Contains(t, normalizedQuery, "e1.kind_id = any (array [4]::int2[])")
 	require.Contains(t, normalizedQuery, "n2.kind_ids operator (pg_catalog.@>)")
@@ -1378,5 +1378,5 @@ MATCH p = (n:Group)-[:MemberOf*1..]->(m)-[:Enroll]-(ca:EnterpriseCA)
 RETURN p
 `)
 
-	require.NotContains(t, normalizedQuery, "exists (select 1 from edge e1 join node n2")
+	require.NotContains(t, normalizedQuery, "exists (select 1 from public.edge_0 e1 join public.node_0 n2")
 }

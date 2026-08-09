@@ -56,10 +56,11 @@ func TestDumpLoadRoundTrip(t *testing.T) {
 	userKind := graph.StringKind("RetrieverUser")
 	systemKind := graph.StringKind("RetrieverSystem")
 	adminKind := graph.StringKind("RetrieverAdminTo")
+	memberKind := graph.StringKind("RetrieverMemberOf")
 	graphSchema := graph.Graph{
 		Name:  graphName,
 		Nodes: graph.Kinds{userKind, systemKind},
-		Edges: graph.Kinds{adminKind},
+		Edges: graph.Kinds{adminKind, memberKind},
 	}
 	if err := db.AssertSchema(ctx, graph.Schema{
 		Graphs:       []graph.Graph{graphSchema},
@@ -112,7 +113,11 @@ func TestDumpLoadRoundTrip(t *testing.T) {
 		}
 
 		for index := range edgeCount {
-			relationship, err := tx.CreateRelationshipByIDs(nodes[index].ID, nodes[index+1].ID, adminKind, graph.AsProperties(map[string]any{
+			edgeKind := adminKind
+			if index%2 == 1 {
+				edgeKind = memberKind
+			}
+			relationship, err := tx.CreateRelationshipByIDs(nodes[index].ID, nodes[index+1].ID, edgeKind, graph.AsProperties(map[string]any{
 				"route": fmt.Sprintf("route-%d", index),
 			}))
 			if err != nil {
@@ -262,11 +267,15 @@ func TestDumpLoadRoundTrip(t *testing.T) {
 		if !startOK || !endOK {
 			t.Fatalf("restored relationship has unresolved endpoint IDs: %+v", relationship)
 		}
-		if relationship.Kind == nil || relationship.Kind.String() != adminKind.String() {
-			t.Fatalf("unexpected restored relationship kind: %+v", relationship.Kind)
-		}
 		if relationship.Properties == nil {
 			t.Fatalf("restored relationship is missing properties: %+v", relationship)
+		}
+		expectedKind := adminKind.String()
+		if route := fmt.Sprint(relationship.Properties.Get("route").Any()); route == "route-1" || route == "route-3" {
+			expectedKind = memberKind.String()
+		}
+		if relationship.Kind == nil || relationship.Kind.String() != expectedKind {
+			t.Fatalf("unexpected restored relationship kind: %+v", relationship.Kind)
 		}
 		restoredRoutes[startName+"->"+endName] = fmt.Sprint(relationship.Properties.Get("route").Any())
 	}

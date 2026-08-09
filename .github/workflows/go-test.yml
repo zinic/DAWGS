@@ -25,12 +25,52 @@ on:
       - "opened"
       - "synchronize"
       - "reopened"
+  push:
+    tags:
+      - "v*"
+  schedule:
+    - cron: "23 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: go-test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  postgres-harness-test:
+    name: Test disposable PostgreSQL harness
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout source code for this repository
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # ratchet:actions/checkout@v5
+
+      - name: Install Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # ratchet:actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+          check-latest: true
+
+      - name: Install PostgreSQL server tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes postgresql postgresql-client
+          postgres_bin_dir="$(dirname "$(find /usr/lib/postgresql -type f -name postgres | sort -V | tail -1)")"
+          test -x "$postgres_bin_dir/initdb"
+          echo "$postgres_bin_dir" >> "$GITHUB_PATH"
+
+      - name: Run harness self-tests
+        run: make test_postgres_harness
+
   call-run-upload-main-coverage-files:
     uses: ./.github/workflows/upload-coverage-files.yml
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: call-run-upload-main-coverage-files
     steps:
       - env:
@@ -84,12 +124,23 @@ jobs:
           else
             echo "Coverage is within the limits"
           fi
-  integration-test-pg:
-    name: Run integration tests (pg)
+
+      - name: Verify frozen fixture and generated worktree
+        run: |
+          make migration_preflight_fixture
+          make test_update
+          git diff --exit-code
+  transition-containment-test-pg:
+    name: Test transition containment (PostgreSQL ${{ matrix.postgres }})
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ["16", "18"]
     services:
       postgres:
-        image: postgres:18
+        image: postgres:${{ matrix.postgres }}
         env:
           POSTGRES_USER: dawgs
           POSTGRES_PASSWORD: weneedbetterpasswords
@@ -112,15 +163,19 @@ jobs:
           cache: true
           check-latest: true
 
-      - name: Run integration tests
+      - name: Assert PostgreSQL major and refusal without implicit bootstrap
         env:
           CONNECTION_STRING: postgres://dawgs:weneedbetterpasswords@localhost:5432/dawgs?sslmode=disable
+          EXPECTED_POSTGRES_MAJOR: ${{ matrix.postgres }}
         run: |
-          make test_integration
+          actual_version="$(psql "$CONNECTION_STRING" -XAtqc 'show server_version_num')"
+          test "$((actual_version / 10000))" = "$EXPECTED_POSTGRES_MAJOR"
+          make test_transition_containment
 
   integration-test-neo4j:
     name: Run integration tests (neo4j)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     services:
       neo4j:
         image: neo4j:4.4.42
@@ -150,3 +205,129 @@ jobs:
           CONNECTION_STRING: neo4j://neo4j:weneedbetterpasswords@localhost:7687
         run: |
           make test_integration
+
+  migration-test-pg:
+    name: Run migration tests (PostgreSQL ${{ matrix.postgres }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ["16", "18"]
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres }}
+        env:
+          POSTGRES_USER: dawgs
+          POSTGRES_PASSWORD: weneedbetterpasswords
+          POSTGRES_DB: dawgs
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U dawgs -d dawgs"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      postgres-restore:
+        image: postgres:${{ matrix.postgres }}
+        env:
+          POSTGRES_USER: dawgs
+          POSTGRES_PASSWORD: weneedbetterpasswords
+          POSTGRES_DB: dawgs
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U dawgs -d dawgs"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Checkout source code for this repository
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # ratchet:actions/checkout@v5
+
+      - name: Install Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # ratchet:actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+          check-latest: true
+
+      - name: Assert PostgreSQL major and run migration tests
+        env:
+          CONNECTION_STRING: postgres://dawgs:weneedbetterpasswords@localhost:5432/dawgs?sslmode=disable
+          EXPECTED_POSTGRES_MAJOR: ${{ matrix.postgres }}
+          DAWGS_TEST_POSTGRES_DISPOSABLE: "1"
+        run: |
+          actual_version="$(psql "$CONNECTION_STRING" -XAtqc 'show server_version_num')"
+          test "$((actual_version / 10000))" = "$EXPECTED_POSTGRES_MAJOR"
+          make verify_frozen_v1_client
+          export DAWGS_FROZEN_V1_EXPORT="$PWD/dist/dawgs-v1-export"
+          ./scripts/prepare-test-pg -- make test_migration
+          ./scripts/prepare-test-pg -- make test_bootstrap
+          ./scripts/prepare-test-pg -- make test_restore
+          ./scripts/prepare-test-pg -- make test_rollback
+          PG_TEST_RESTORE_SOURCE_ADMIN="$CONNECTION_STRING" \
+          PG_TEST_RESTORE_TARGET_ADMIN="postgres://dawgs:weneedbetterpasswords@localhost:5433/dawgs?sslmode=disable" \
+          PG_TEST_POSTGRES_CLIENT_IMAGE="postgres:$EXPECTED_POSTGRES_MAJOR" \
+          make test_restore_independent
+          make migration_preflight_fixture migration_artifact MIGRATOR_VERSION=ci SOURCE_REVISION="$GITHUB_SHA"
+
+      - name: Upload migrator artifact evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # ratchet:actions/upload-artifact@v4
+        with:
+          name: dawgs-pg-migrate-postgresql-${{ matrix.postgres }}
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            dist/dawgs-pg-migrate
+            dist/dawgs-pg-migrate.sha256
+            dist/dawgs-pg-migrate.metadata.txt
+            dist/dawgs-pg-migrate.inputs.sha256
+            dist/dawgs-pg-migrate.publication.sha256
+            dist/archive-policy.md
+            dist/dawgs-v1-export
+            dist/dawgs-v1-export.sha256
+            dist/dawgs-v1-export.metadata.txt
+
+  physical-test-pg:
+    name: Run physical tests (PostgreSQL ${{ matrix.postgres }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ["16", "18"]
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres }}
+        env:
+          POSTGRES_USER: dawgs
+          POSTGRES_PASSWORD: weneedbetterpasswords
+          POSTGRES_DB: dawgs
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U dawgs -d dawgs"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Checkout source code for this repository
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # ratchet:actions/checkout@v5
+
+      - name: Install Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # ratchet:actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+          check-latest: true
+
+      - name: Assert PostgreSQL major and run physical tests
+        env:
+          CONNECTION_STRING: postgres://dawgs:weneedbetterpasswords@localhost:5432/dawgs?sslmode=disable
+          EXPECTED_POSTGRES_MAJOR: ${{ matrix.postgres }}
+          DAWGS_TEST_POSTGRES_DISPOSABLE: "1"
+        run: |
+          actual_version="$(psql "$CONNECTION_STRING" -XAtqc 'show server_version_num')"
+          test "$((actual_version / 10000))" = "$EXPECTED_POSTGRES_MAJOR"
+          ./scripts/prepare-test-pg -- make test_pg_physical

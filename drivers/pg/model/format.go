@@ -1,8 +1,9 @@
 package model
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"strconv"
-	"strings"
 
 	"github.com/specterops/dawgs/graph"
 )
@@ -24,24 +25,26 @@ func EdgePartitionTableName(graphID int32) string {
 	return partitionTableName(EdgeTable, graphID)
 }
 
+// EdgeKindPartitionTableName returns the canonical physical leaf name for an
+// edge kind. Kind IDs are signed smallints, so negative IDs intentionally
+// retain their minus sign in the relation name.
+func EdgeKindPartitionTableName(graphID int32, kindID int16) string {
+	return EdgePartitionTableName(graphID) + "_" + strconv.FormatInt(int64(kindID), 10)
+}
+
 func IndexName(table string, index graph.Index) string {
-	stringBuilder := strings.Builder{}
-
-	stringBuilder.WriteString(table)
-	stringBuilder.WriteString("_")
-	stringBuilder.WriteString(index.Field)
-	stringBuilder.WriteString("_index")
-
-	return stringBuilder.String()
+	return managedName("dawgs_idx_", table, index.Field, index.Type.String())
 }
 
 func ConstraintName(table string, constraint graph.Constraint) string {
-	stringBuilder := strings.Builder{}
+	return managedName("dawgs_uq_", table, constraint.Field, constraint.Type.String())
+}
 
-	stringBuilder.WriteString(table)
-	stringBuilder.WriteString("_")
-	stringBuilder.WriteString(constraint.Field)
-	stringBuilder.WriteString("_constraint")
-
-	return stringBuilder.String()
+func managedName(prefix string, components ...string) string {
+	digest := sha256.New()
+	for _, component := range components {
+		digest.Write([]byte{0})
+		digest.Write([]byte(component))
+	}
+	return prefix + hex.EncodeToString(digest.Sum(nil)[:16])
 }

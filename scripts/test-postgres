@@ -1,0 +1,440 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+readonly program_name="${0##*/}"
+runtime_root="${DAWGS_TEST_POSTGRES_ROOT:-${TMPDIR:-/tmp}/dawgs-test-postgres-${UID}}"
+postgres_bin_dir="${DAWGS_TEST_POSTGRES_BIN_DIR:-}"
+postgres_profile="${DAWGS_TEST_POSTGRES_PROFILE:-fast-read}"
+postgres_log_output=""
+readonly database_user="${DAWGS_TEST_POSTGRES_USER:-dawgs}"
+readonly database_name="${DAWGS_TEST_POSTGRES_DATABASE:-dawgs}"
+run_instance=""
+run_nonce=""
+created_run_instance=false
+
+usage() {
+    cat >&2 <<EOF
+Usage:
+  ${program_name} [--bin-dir DIR] [--profile fast-read|durable] up [INSTANCE]
+  ${program_name} [--bin-dir DIR] [--profile fast-read|durable] down [INSTANCE]
+  ${program_name} [--bin-dir DIR] [--profile fast-read|durable] connection [INSTANCE]
+  ${program_name} [--bin-dir DIR] [--profile fast-read|durable] env [INSTANCE]
+  ${program_name} [--bin-dir DIR] [--profile fast-read|durable] [--log-output FILE] run [INSTANCE] -- COMMAND [ARG ...]
+
+Instances default to "default". Each instance owns an independent PostgreSQL
+cluster and port. The run command defaults to a process-unique instance, sets
+CONNECTION_STRING for COMMAND, and always tears the cluster down afterward.
+The fast-read profile disables durability for disposable read attribution. The
+durable profile enables fsync, synchronous commit, and full-page writes.
+EOF
+}
+
+die() {
+    printf '%s: %s\n' "${program_name}" "$*" >&2
+    exit 1
+}
+
+require_command() {
+    command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
+}
+
+validate_instance() {
+    local instance="$1"
+    [[ "${instance}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || die "invalid instance name: ${instance}"
+    [[ "${instance}" != "." && "${instance}" != ".." ]] || die "invalid instance name: ${instance}"
+}
+
+validate_runtime_root() {
+    local requested_root="${runtime_root}"
+    [[ -n "${runtime_root}" && "${runtime_root}" != "/" && "${runtime_root}" != "." ]] || \
+        die "unsafe runtime root: ${runtime_root}"
+    [[ ! -e "${requested_root}" || ! -L "${requested_root}" ]] || \
+        die "runtime root must not be a symlink: ${requested_root}"
+    mkdir -p -m 700 "${runtime_root}"
+    runtime_root="$(cd -P -- "${runtime_root}" && pwd)"
+    [[ ! -L "${runtime_root}" ]] || die "runtime root must not be a symlink: ${runtime_root}"
+}
+
+configure_postgres_path() {
+    if [[ -n "${postgres_bin_dir}" ]]; then
+        [[ "${postgres_bin_dir}" == /* && -d "${postgres_bin_dir}" && ! -L "${postgres_bin_dir}" ]] || \
+            die "--bin-dir must be an absolute, non-symlink directory"
+        for binary in initdb pg_ctl createdb psql postgres; do
+            [[ -x "${postgres_bin_dir}/${binary}" ]] || die "missing PostgreSQL binary: ${postgres_bin_dir}/${binary}"
+        done
+        PATH="${postgres_bin_dir}:${PATH}"
+    fi
+}
+
+validate_profile() {
+    case "${postgres_profile}" in
+        fast-read|durable) ;;
+        *) die "invalid PostgreSQL profile: ${postgres_profile}; expected fast-read or durable" ;;
+    esac
+}
+
+validate_log_output() {
+    [[ -z "${postgres_log_output}" ]] && return
+    [[ "${postgres_log_output}" == /* ]] || die "--log-output must be an absolute path"
+    [[ ! -e "${postgres_log_output}" ]] || die "--log-output already exists: ${postgres_log_output}"
+    case "${postgres_log_output}" in
+        "${runtime_root}"|"${runtime_root}/"*) die "--log-output must be outside the temporary PostgreSQL root" ;;
+    esac
+    [[ -d "$(dirname -- "${postgres_log_output}")" ]] || die "--log-output parent directory does not exist"
+}
+
+postgres_profile_options() {
+    case "${postgres_profile}" in
+        fast-read)
+            printf '%s\n' "-c fsync=off -c synchronous_commit=off -c full_page_writes=off"
+            ;;
+        durable)
+            printf '%s\n' "-c fsync=on -c synchronous_commit=on -c full_page_writes=on"
+            ;;
+    esac
+}
+
+instance_dir() {
+    printf '%s/%s\n' "${runtime_root}" "$1"
+}
+
+data_dir() {
+    printf '%s/data\n' "$(instance_dir "$1")"
+}
+
+port_file() {
+    printf '%s/port\n' "$(instance_dir "$1")"
+}
+
+state_file() {
+    printf '%s/state\n' "$(instance_dir "$1")"
+}
+
+new_nonce() {
+    require_command od
+    od -An -N16 -tx1 /dev/urandom | tr -d ' \n'
+}
+
+acquire_instance_lock() {
+    local instance="$1" lock_path="${runtime_root}/.${instance}.lock"
+    require_command flock
+    exec 9>"${lock_path}"
+    flock -x 9
+}
+
+read_state_value() {
+    local instance="$1" key="$2" value
+    [[ -r "$(state_file "${instance}")" ]] || die "missing instance state: ${instance}"
+    value="$(sed -n "s/^${key}=//p" "$(state_file "${instance}")")"
+    [[ -n "${value}" ]] || die "invalid instance state for ${instance}: missing ${key}"
+    printf '%s\n' "${value}"
+}
+
+connection_string() {
+    local instance="$1"
+    local port_path encoded_user encoded_database
+    port_path="$(port_file "${instance}")"
+    [[ -r "${port_path}" ]] || die "instance is not running: ${instance}"
+    require_command python3
+    encoded_user="$(python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "${database_user}")"
+    encoded_database="$(python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "${database_name}")"
+    printf 'postgresql://%s@127.0.0.1:%s/%s?sslmode=disable\n' \
+        "${encoded_user}" "$(<"${port_path}")" "${encoded_database}"
+}
+
+choose_port() {
+    require_command python3
+    python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()'
+}
+
+is_running() {
+    pg_ctl -D "$(data_dir "$1")" status >/dev/null 2>&1
+}
+
+up_instance() {
+    local instance="$1" requested_nonce="${2:-}"
+    local cluster_dir cluster_data cluster_log selected_port attempt actual_version selected_major state_path profile_options
+
+    validate_instance "${instance}"
+    require_command initdb
+    require_command pg_ctl
+    require_command createdb
+    require_command psql
+    require_command postgres
+
+    selected_major="$(postgres --version | sed -n 's/^postgres (PostgreSQL) \([0-9][0-9]*\)\..*$/\1/p')"
+    [[ "${selected_major}" =~ ^[0-9]+$ ]] || die "unable to determine selected PostgreSQL major"
+
+    cluster_dir="$(instance_dir "${instance}")"
+    cluster_data="$(data_dir "${instance}")"
+    cluster_log="${cluster_dir}/postgres.log"
+    profile_options="$(postgres_profile_options)"
+
+    if [[ -d "${cluster_data}" ]]; then
+        if is_running "${instance}"; then
+            created_run_instance=false
+            connection_string "${instance}"
+            return
+        fi
+        die "stale instance exists: ${instance}; run '${program_name} down ${instance}' first"
+    fi
+
+    mkdir -m 700 "${cluster_dir}"
+    requested_nonce="${requested_nonce:-$(new_nonce)}"
+    state_path="$(state_file "${instance}")"
+    umask 077
+    {
+        printf 'nonce=%s\n' "${requested_nonce}"
+        printf 'instance=%s\n' "${instance}"
+        printf 'directory=%s\n' "${cluster_dir}"
+        printf 'data_directory=%s\n' "${cluster_data}"
+        printf 'created_by_pid=%s\n' "$$"
+        printf 'profile=%s\n' "${postgres_profile}"
+        printf 'status=initializing\n'
+    } >"${state_path}"
+    chmod 600 "${state_path}"
+    created_run_instance=true
+
+    if ! initdb -D "${cluster_data}" --username="${database_user}" --auth=trust --no-instructions >"${cluster_dir}/initdb.log" 2>&1; then
+        printf '%s: initdb failed; log follows\n' "${program_name}" >&2
+        sed -n '1,160p' "${cluster_dir}/initdb.log" >&2
+        return 1
+    fi
+
+    for attempt in {1..10}; do
+        selected_port="$(choose_port)"
+        printf '%s\n' "${selected_port}" >"$(port_file "${instance}")"
+        if pg_ctl -D "${cluster_data}" -l "${cluster_log}" -w -t 20 start \
+            -o "-h 127.0.0.1 -p ${selected_port} -c unix_socket_directories='' ${profile_options}" \
+            9>&- >/dev/null 2>&1; then
+            break
+        fi
+        if is_running "${instance}"; then
+            pg_ctl -D "${cluster_data}" -m immediate -w -t 20 stop >/dev/null 2>&1 || return 1
+        fi
+        if (( attempt == 10 )); then
+            printf '%s: PostgreSQL failed to start; log follows\n' "${program_name}" >&2
+            sed -n '1,200p' "${cluster_log}" >&2
+            return 1
+        fi
+    done
+
+    if ! createdb --host=127.0.0.1 --port="${selected_port}" --username="${database_user}" "${database_name}"; then
+        pg_ctl -D "${cluster_data}" -m immediate stop >/dev/null 2>&1 || true
+        return 1
+    fi
+
+    actual_version="$(psql "$(connection_string "${instance}")" -XAtqc 'show server_version_num')"
+    [[ "${actual_version}" =~ ^[0-9]+$ ]] || die "unable to determine server_version_num"
+    (( actual_version / 10000 == selected_major )) || \
+        die "selected PostgreSQL ${selected_major}, but server reported ${actual_version}"
+    {
+        printf 'nonce=%s\n' "${requested_nonce}"
+        printf 'instance=%s\n' "${instance}"
+        printf 'directory=%s\n' "${cluster_dir}"
+        printf 'data_directory=%s\n' "${cluster_data}"
+        printf 'created_by_pid=%s\n' "$$"
+        printf 'port=%s\n' "${selected_port}"
+        printf 'server_version_num=%s\n' "${actual_version}"
+        printf 'profile=%s\n' "${postgres_profile}"
+        printf 'fsync=%s\n' "$(psql "$(connection_string "${instance}")" -XAtqc 'show fsync')"
+        printf 'synchronous_commit=%s\n' "$(psql "$(connection_string "${instance}")" -XAtqc 'show synchronous_commit')"
+        printf 'full_page_writes=%s\n' "$(psql "$(connection_string "${instance}")" -XAtqc 'show full_page_writes')"
+        printf 'wal_level=%s\n' "$(psql "$(connection_string "${instance}")" -XAtqc 'show wal_level')"
+        printf 'wal_compression=%s\n' "$(psql "$(connection_string "${instance}")" -XAtqc 'show wal_compression')"
+        printf 'checkpoint_timeout=%s\n' "$(psql "$(connection_string "${instance}")" -XAtqc 'show checkpoint_timeout')"
+        printf 'checkpoint_completion_target=%s\n' "$(psql "$(connection_string "${instance}")" -XAtqc 'show checkpoint_completion_target')"
+        printf 'min_wal_size=%s\n' "$(psql "$(connection_string "${instance}")" -XAtqc 'show min_wal_size')"
+        printf 'max_wal_size=%s\n' "$(psql "$(connection_string "${instance}")" -XAtqc 'show max_wal_size')"
+        printf 'status=running\n'
+    } >"${state_path}"
+    chmod 600 "${state_path}"
+
+    printf '%s: started instance %s on port %s\n' "${program_name}" "${instance}" "${selected_port}" >&2
+    connection_string "${instance}"
+}
+
+down_instance() {
+    local instance="$1" expected_nonce="${2:-}"
+    local cluster_dir cluster_data recorded_dir recorded_nonce
+
+    validate_instance "${instance}"
+    require_command pg_ctl
+    cluster_dir="$(instance_dir "${instance}")"
+    cluster_data="$(data_dir "${instance}")"
+
+    if [[ ! -d "${cluster_dir}" ]]; then
+        printf '%s: instance is already absent: %s\n' "${program_name}" "${instance}" >&2
+        return
+    fi
+
+    recorded_dir="$(read_state_value "${instance}" directory)"
+    recorded_nonce="$(read_state_value "${instance}" nonce)"
+    [[ "${recorded_dir}" == "${cluster_dir}" ]] || die "state directory mismatch for ${instance}"
+    if [[ -n "${expected_nonce}" && "${recorded_nonce}" != "${expected_nonce}" ]]; then
+        die "refusing to remove instance owned by another invocation: ${instance}"
+    fi
+
+    case "${cluster_dir}" in
+        "${runtime_root}/"*) ;;
+        *) die "refusing to remove path outside runtime root: ${cluster_dir}" ;;
+    esac
+
+    if [[ -d "${cluster_data}" ]] && is_running "${instance}"; then
+        pg_ctl -D "${cluster_data}" -m fast -w -t 20 stop >/dev/null
+    fi
+    rm -rf -- "${cluster_dir}"
+    printf '%s: stopped and removed instance %s\n' "${program_name}" "${instance}" >&2
+}
+
+cleanup_run_instance() {
+	local status=$? cleanup_status=0
+    if [[ -n "${run_instance}" && "${created_run_instance}" == true ]]; then
+		if [[ -n "${postgres_log_output}" && -r "$(instance_dir "${run_instance}")/postgres.log" ]]; then
+			umask 077
+			if ! sed -E 's#postgres(ql)?://[^[:space:]]+#<redacted-postgresql-url>#g' \
+				"$(instance_dir "${run_instance}")/postgres.log" >"${postgres_log_output}"; then
+				cleanup_status=1
+			fi
+		fi
+		if ! down_instance "${run_instance}" "${run_nonce}"; then
+			cleanup_status=1
+		fi
+    fi
+	if (( status != 0 )); then
+		return "${status}"
+	fi
+	return "${cleanup_status}"
+}
+
+exit_for_signal() {
+    exit "$1"
+}
+
+run_command() {
+    local instance connection
+
+    if [[ "${1:-}" == "--" ]]; then
+        instance="run-$$"
+    else
+        [[ $# -gt 0 ]] || die "run requires -- COMMAND"
+        instance="$1"
+        shift
+    fi
+    [[ "${1:-}" == "--" ]] || die "run requires -- before COMMAND"
+    shift
+    [[ $# -gt 0 ]] || die "run requires a COMMAND"
+
+    validate_instance "${instance}"
+    acquire_instance_lock "${instance}"
+    run_instance="${instance}"
+    run_nonce="$(new_nonce)"
+    if [[ -d "$(data_dir "${instance}")" ]]; then
+        created_run_instance=false
+    else
+        created_run_instance=true
+    fi
+    trap cleanup_run_instance EXIT
+    trap 'exit_for_signal 129' HUP
+    trap 'exit_for_signal 130' INT
+    trap 'exit_for_signal 143' TERM
+    connection="$(up_instance "${instance}" "${run_nonce}")"
+    DAWGS_TEST_POSTGRES_DISPOSABLE=1 DAWGS_TEST_POSTGRES_PROFILE="${postgres_profile}" CONNECTION_STRING="${connection}" "$@"
+}
+
+main() {
+    local action
+    local instance
+    while [[ "${1:-}" == --* ]]; do
+        case "$1" in
+            --bin-dir)
+                [[ $# -ge 3 ]] || die "--bin-dir requires DIR and an action"
+                postgres_bin_dir="$2"
+                shift 2
+                ;;
+            --profile)
+                [[ $# -ge 3 ]] || die "--profile requires a value and an action"
+                postgres_profile="$2"
+                shift 2
+                ;;
+            --log-output)
+                [[ $# -ge 3 ]] || die "--log-output requires FILE and an action"
+                postgres_log_output="$2"
+                shift 2
+                ;;
+            --help)
+                usage
+                exit 0
+                ;;
+            *) die "unknown option: $1" ;;
+        esac
+    done
+    action="${1:-}"
+    [[ -n "${action}" ]] || { usage; exit 2; }
+    shift
+    validate_runtime_root
+    configure_postgres_path
+    validate_profile
+	validate_log_output
+
+    case "${action}" in
+        up)
+            [[ $# -le 1 ]] || die "up accepts at most one INSTANCE"
+            instance="${1:-default}"
+            validate_instance "${instance}"
+            acquire_instance_lock "${instance}"
+            run_instance="${instance}"
+            run_nonce="$(new_nonce)"
+            if [[ -d "$(data_dir "${instance}")" ]]; then
+                created_run_instance=false
+            else
+                created_run_instance=true
+            fi
+            trap cleanup_run_instance EXIT
+            trap 'exit_for_signal 129' HUP
+            trap 'exit_for_signal 130' INT
+            trap 'exit_for_signal 143' TERM
+            up_instance "${instance}" "${run_nonce}"
+            run_instance=""
+            trap - EXIT HUP INT TERM
+            ;;
+        down)
+            [[ $# -le 1 ]] || die "down accepts at most one INSTANCE"
+            instance="${1:-default}"
+            validate_instance "${instance}"
+            acquire_instance_lock "${instance}"
+            down_instance "${instance}"
+            ;;
+        connection)
+            [[ $# -le 1 ]] || die "connection accepts at most one INSTANCE"
+            instance="${1:-default}"
+            validate_instance "${instance}"
+            acquire_instance_lock "${instance}"
+            require_command pg_ctl
+            is_running "${instance}" || die "instance is not running: ${instance}"
+            connection_string "${instance}"
+            ;;
+        env)
+            [[ $# -le 1 ]] || die "env accepts at most one INSTANCE"
+            instance="${1:-default}"
+            validate_instance "${instance}"
+            acquire_instance_lock "${instance}"
+            require_command pg_ctl
+            is_running "${instance}" || die "instance is not running: ${instance}"
+            printf 'export CONNECTION_STRING=%q\n' "$(connection_string "${instance}")"
+            ;;
+        run)
+            run_command "$@"
+            ;;
+        help|-h|--help)
+            usage
+            ;;
+        *)
+            usage
+            die "unknown action: ${action}"
+            ;;
+    esac
+}
+
+main "$@"

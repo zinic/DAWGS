@@ -78,6 +78,15 @@ func openDatabase(ctx context.Context, cfg databaseConfig) (graph.Database, stri
 			_ = db.Close(ctx)
 		}
 	}()
+	if driverName == pg.DriverName {
+		pgDriver, ok := db.(*pg.Driver)
+		if !ok {
+			return nil, "", fmt.Errorf("expected *pg.Driver, got %T", db)
+		}
+		if _, err := pgDriver.Readiness(ctx); err != nil {
+			return nil, "", fmt.Errorf("PostgreSQL readiness: %w", err)
+		}
+	}
 
 	if graphName := strings.TrimSpace(cfg.Graph); graphName != "" {
 		if err := db.SetDefaultGraph(ctx, graph.Graph{
@@ -162,9 +171,9 @@ func discoverPostgresGraphs(ctx context.Context, db graph.Database) ([]retriever
 	const graphQuery = `
 select
   g.name,
-  to_regclass('node_' || g.id::text) is not null as has_node_partition,
-  to_regclass('edge_' || g.id::text) is not null as has_edge_partition
-from graph g
+  pg_catalog.to_regclass('public.node_' || g.id::text) is not null as has_node_partition,
+  pg_catalog.to_regclass('public.edge_' || g.id::text) is not null as has_edge_partition
+from public.graph g
 order by g.name`
 
 	var targets []retriever.GraphTarget
