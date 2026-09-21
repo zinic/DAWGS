@@ -27,6 +27,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/specterops/dawgs"
 	"github.com/specterops/dawgs/cypher/frontend"
@@ -178,6 +179,9 @@ func setupIndexedPostgresDB(t *testing.T, graphName string, nodeIndexes []graph.
 	if driverName != pg.DriverName {
 		t.Skip("CONNECTION_STRING is not a PostgreSQL connection string")
 	}
+	if os.Getenv("DAWGS_TEST_POSTGRES_DISPOSABLE") == "1" {
+		connStr = bootstrapDisposablePostgres(t, context.Background(), connStr)
+	}
 
 	ctx := context.Background()
 	poolCfg, err := pgxpool.ParseConfig(connStr)
@@ -224,6 +228,15 @@ func setupIndexedPostgresDB(t *testing.T, graphName string, nodeIndexes []graph.
 		_ = db.Close(ctx)
 		t.Fatal("PostgreSQL default graph is not set")
 	}
+	if os.Getenv("DAWGS_TEST_POSTGRES_DISPOSABLE") == "1" {
+		provisionAcceptedNodeIndexes(t, ctx, defaultGraph.Partitions.Node.Name, nodeIndexes)
+		// Owner-managed DDL requires a fresh startup assertion before the
+		// target-backed test driver resumes operations.
+		if err := pgDriver.AssertSchema(ctx, schema); err != nil {
+			_ = db.Close(ctx)
+			t.Fatalf("reassert schema after owner-managed indexes: %v", err)
+		}
+	}
 
 	indexNames := make(map[string]string, len(nodeIndexes))
 	for _, index := range nodeIndexes {
@@ -246,6 +259,49 @@ func setupIndexedPostgresDB(t *testing.T, graphName string, nodeIndexes []graph.
 	})
 
 	return indexedDB
+}
+
+func provisionAcceptedNodeIndexes(t *testing.T, ctx context.Context, table string, indexes []graph.Index) {
+	t.Helper()
+	adminSource := os.Getenv("PG_TEST_ADMIN_CONNECTION_STRING")
+	ownerRole := os.Getenv("PG_TEST_OWNER_ROLE")
+	if adminSource == "" || ownerRole == "" {
+		t.Fatal("disposable accepted-layout index test requires admin connection and owner role")
+	}
+	admin, err := pgx.Connect(ctx, adminSource)
+	if err != nil {
+		t.Fatalf("open index provisioning coordinator: %v", err)
+	}
+	defer admin.Close(ctx)
+	tx, err := admin.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin owner-managed index provisioning: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, "set local role "+pgx.Identifier{ownerRole}.Sanitize()); err != nil {
+		t.Fatalf("assume managed owner for index provisioning: %v", err)
+	}
+	for _, index := range indexes {
+		name := pgmodel.IndexName(table, index)
+		field := "'" + strings.ReplaceAll(index.Field, "'", "''") + "'"
+		prefix := fmt.Sprintf("create index if not exists %s on %s using ",
+			pgx.Identifier{name}.Sanitize(), pgx.Identifier{"public", table}.Sanitize())
+		var statement string
+		switch index.Type {
+		case graph.BTreeIndex:
+			statement = prefix + fmt.Sprintf("btree ((properties ->> %s))", field)
+		case graph.TextSearchIndex:
+			statement = prefix + fmt.Sprintf("gin ((properties ->> %s) gin_trgm_ops)", field)
+		default:
+			t.Fatalf("unsupported test index type %s", index.Type)
+		}
+		if _, err := tx.Exec(ctx, statement); err != nil {
+			t.Fatalf("provision owner-managed index %s: %v", name, err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit owner-managed index provisioning: %v", err)
+	}
 }
 
 // clearIndexedGraph removes fixture nodes from the indexed graph before and

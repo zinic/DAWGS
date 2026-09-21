@@ -39,6 +39,9 @@ func TestDumpLoadRoundTrip(t *testing.T) {
 	if connection == "" {
 		t.Skip("CONNECTION_STRING not set")
 	}
+	if os.Getenv("DAWGS_TEST_POSTGRES_DISPOSABLE") == "1" && os.Getenv("PG_TEST_TARGET_CONNECTION_STRING") != "" {
+		connection = os.Getenv("PG_TEST_TARGET_CONNECTION_STRING")
+	}
 	driverName, err := driverFromConnectionString(connection)
 	if err != nil {
 		t.Fatalf("infer driver: %v", err)

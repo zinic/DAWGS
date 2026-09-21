@@ -73,6 +73,8 @@ end
 $$ language plpgsql security definer
 set search_path = pg_catalog, public, pg_temp;
 
+revoke all on function public.dawgs_refuse_graph_delete() from public;
+
 drop trigger if exists dawgs_refuse_graph_delete on public.graph;
 create trigger dawgs_refuse_graph_delete before delete on public.graph
 for each statement execute function public.dawgs_refuse_graph_delete();
@@ -207,6 +209,8 @@ begin
 end
 $$ language plpgsql security definer set search_path=pg_catalog,public,pg_temp;
 
+revoke all on function public.dawgs_refuse_cleanup_map_mutation() from public;
+
 drop trigger if exists dawgs_refuse_cleanup_scope_mutation on public.dawgs_legacy_cleanup_scope;
 create trigger dawgs_refuse_cleanup_scope_mutation before update or delete on public.dawgs_legacy_cleanup_scope
 for each statement execute function public.dawgs_refuse_cleanup_map_mutation();
@@ -284,6 +288,8 @@ begin
   raise exception using errcode='55000', message='DAWGS receipts are append-only';
 end
 $$ language plpgsql security definer set search_path=pg_catalog,public,pg_temp;
+
+revoke all on function public.dawgs_refuse_receipt_mutation() from public;
 
 drop trigger if exists dawgs_refuse_receipt_mutation on public.dawgs_schema_receipt;
 create trigger dawgs_refuse_receipt_mutation before update or delete on public.dawgs_schema_receipt
@@ -682,6 +688,8 @@ end
 $$ language plpgsql security definer
 set search_path = pg_catalog, public, pg_temp;
 
+revoke all on function public.dawgs_claim_edge() from public;
+
 create or replace function public.dawgs_update_edge_claims() returns trigger as
 $$
 declare
@@ -719,6 +727,8 @@ begin
 end
 $$ language plpgsql security definer
 set search_path = pg_catalog, public, pg_temp;
+
+revoke all on function public.dawgs_update_edge_claims() from public;
 
 drop trigger if exists dawgs_10_claim_edge on public.edge;
 create trigger dawgs_10_claim_edge after insert on public.edge

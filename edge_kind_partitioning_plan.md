@@ -3446,9 +3446,10 @@ smoke.
 - [ ] Preparation V1 release exists and refuses V2.
 - [ ] Fresh bootstrap creates only complete V2 with the exact pending-handoff
       shape, then records authenticated target handoff/smoke before runtime.
-- [ ] Every accepted operation revalidates exact target session/current-user
-      identity; operator, inherited/SET ROLE, and reconnected wrong-role
-      sessions remain nonoperational.
+- [ ] Every service asserts the accepted layout and exact target identity
+      before traffic; every new physical backend receives one narrow identity
+      check; operator, inherited/SET ROLE, and reconnected wrong-role sessions
+      remain nonoperational; managed changes are drained and reasserted.
 - [ ] Every supported profile provides a trusted non-copied current cluster/
       resource and restore-incarnation identity, or explicitly rejects the
       restore modes it cannot distinguish; installation UUID is never a

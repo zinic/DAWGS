@@ -363,6 +363,9 @@ where singleton and state='v2_pending_acceptance' and active_migration_id=$1`, m
 	if tag.RowsAffected() != 1 {
 		return Report{}, fmt.Errorf("acceptance pointer changed concurrently")
 	}
+	if err := validateAcceptedCatalog(ctx, tx, owner.Name, target.RoleName); err != nil {
+		return Report{}, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return Report{}, fmt.Errorf("commit_outcome_unknown: %w", err)
 	}

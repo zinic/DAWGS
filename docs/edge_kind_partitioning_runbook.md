@@ -88,6 +88,13 @@ approvals.
 
 ## Observation and thresholds
 
+Before any service instance receives traffic, mutating services must complete
+`AssertSchema` and read-only services must complete `AssertRuntime`. Managed
+DDL, ACL, trigger, role, migration, restore/rebind, or identity changes require
+draining every instance, applying the change, and restarting or reasserting
+every instance before traffic resumes. `Readiness` is the explicit fresh audit;
+ordinary warm transactions are not a next-operation drift detector.
+
 Attach a `pg.ObservationSink` to transition runtimes that exercise readiness or
 leaf provisioning. Its fixed schema exposes only event/result enums, typed
 layout error code/state, topology digest, aggregate counts, PostgreSQL major,

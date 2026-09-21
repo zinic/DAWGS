@@ -399,6 +399,7 @@ case state
       join pg_catalog.pg_namespace n on n.oid=c.relnamespace
       where n.nspname='public' and c.relowner<>owner_role_oid)
     and not pg_catalog.has_schema_privilege(target_role_name,'public','CREATE')
+    and pg_catalog.has_database_privilege(target_role_name,pg_catalog.current_database(),'CONNECT,TEMPORARY')
     and pg_catalog.has_table_privilege(target_role_name,'public.graph','SELECT')
     and not pg_catalog.has_table_privilege(target_role_name,'public.graph','INSERT,UPDATE,DELETE')
     and pg_catalog.has_table_privilege(target_role_name,'public.node','SELECT,INSERT,UPDATE,DELETE')

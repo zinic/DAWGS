@@ -87,6 +87,10 @@ func frozenV1StructuralCatalog(ctx context.Context, pool *pgxpool.Pool) ([]strin
 			continue
 		}
 		routine.OID, routine.Owner = 0, ""
+		// The rollback handoff intentionally replaces the historical routine
+		// grantee with the preparation role. Its privilege matrix is asserted
+		// separately below; this projection compares structural routine facts.
+		routine.ACL = nil
 		if err := appendCatalogFact(&facts, "routine", routine); err != nil {
 			return nil, err
 		}

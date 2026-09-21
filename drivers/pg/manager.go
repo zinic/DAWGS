@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -45,15 +44,25 @@ type SchemaManager struct {
 	lock                  *sync.RWMutex
 	graphQueryMemoryLimit size.Size
 	observations          observationState
-	startupLock           sync.Mutex
-	startupReady          atomic.Bool
-	closed                atomic.Bool
+	lifecycle             lifecycleCoordinator
 	backendLock           sync.Mutex
-	validatedBackends     map[*pgx.Conn]struct{}
+	validatedBackends     map[*pgx.Conn]backendValidation
+	backendGeneration     uint64
+	backendClock          uint64
+	maxValidatedBackends  int
 	expectedRuntime       runtimeReadiness
 }
 
+type backendValidation struct {
+	generation uint64
+	lastUsed   uint64
+}
+
 func NewSchemaManager(pool *pgxpool.Pool, graphQueryMemoryLimit size.Size) *SchemaManager {
+	maxValidatedBackends := 1
+	if pool != nil && pool.Config().MaxConns > 0 {
+		maxValidatedBackends = int(pool.Config().MaxConns)
+	}
 	return &SchemaManager{
 		pool:                  pool,
 		hasDefaultGraph:       false,
@@ -62,14 +71,13 @@ func NewSchemaManager(pool *pgxpool.Pool, graphQueryMemoryLimit size.Size) *Sche
 		kindIDsByKind:         map[int16]graph.Kind{},
 		lock:                  &sync.RWMutex{},
 		graphQueryMemoryLimit: graphQueryMemoryLimit,
-		validatedBackends:     map[*pgx.Conn]struct{}{},
+		lifecycle:             newLifecycleCoordinator(),
+		validatedBackends:     map[*pgx.Conn]backendValidation{},
+		maxValidatedBackends:  maxValidatedBackends,
 	}
 }
 
-func (s *SchemaManager) requireStartupValidation() error {
-	if s.closed.Load() || !s.startupReady.Load() {
-		return &LayoutError{Code: LayoutErrorStartupValidation, State: "unasserted", Err: ErrStartupValidation}
-	}
+func requireActivation() error {
 	if !activationReady() {
 		return &LayoutError{Code: LayoutErrorActivationNotReady, State: "v2_accepted", Err: ErrActivationNotReady}
 	}
@@ -79,47 +87,118 @@ func (s *SchemaManager) requireStartupValidation() error {
 // acquireOperational is the transaction hot-path gate. Startup performs the
 // exhaustive catalog, topology, receipt, database, and role validation once;
 // ordinary operations only consult local state before acquiring a connection.
-func (s *SchemaManager) acquireOperational(ctx context.Context) (*pgxpool.Conn, error) {
-	if err := s.requireStartupValidation(); err != nil {
+func (s *SchemaManager) acquireOperational(ctx context.Context) (*operationalLease, error) {
+	generation, err := s.lifecycle.beginOperation()
+	if err != nil {
+		return nil, err
+	}
+	if err := requireActivation(); err != nil {
+		s.lifecycle.endOperation()
 		return nil, err
 	}
 	conn, err := s.pool.Acquire(ctx)
 	if err != nil {
+		s.lifecycle.endOperation()
 		return nil, err
 	}
-	if err := s.requireStartupValidation(); err != nil {
+	if !s.lifecycle.isReadyGeneration(generation) {
 		conn.Release()
+		s.lifecycle.endOperation()
+		return nil, &LayoutError{Code: LayoutErrorStartupValidation, State: "asserting", Err: ErrStartupValidation}
+	}
+	if err := s.ensureBackend(ctx, conn, generation); err != nil {
+		discardPooledConnection(ctx, conn)
+		s.lifecycle.endOperation()
 		return nil, err
 	}
-	if err := s.ensureBackend(ctx, conn); err != nil {
-		conn.Release()
-		return nil, err
-	}
-	return conn, nil
+	return &operationalLease{manager: s, conn: conn}, nil
 }
 
-func (s *SchemaManager) ensureBackend(ctx context.Context, conn *pgxpool.Conn) error {
+func (s *SchemaManager) ensureBackend(ctx context.Context, conn *pgxpool.Conn, generation uint64) error {
 	physical := conn.Conn()
 	s.backendLock.Lock()
-	defer s.backendLock.Unlock()
-	if _, ok := s.validatedBackends[physical]; ok {
+	s.backendClock++
+	if validation, ok := s.validatedBackends[physical]; ok && validation.generation == generation && s.backendGeneration == generation {
+		validation.lastUsed = s.backendClock
+		s.validatedBackends[physical] = validation
+		s.backendLock.Unlock()
 		return nil
 	}
-	if err := AfterPooledConnectionEstablished(ctx, physical); err != nil {
+	expected := s.expectedRuntime
+	expectedGeneration := s.backendGeneration
+	s.backendLock.Unlock()
+	if expectedGeneration != generation || !s.lifecycle.isReadyGeneration(generation) {
+		return &LayoutError{Code: LayoutErrorStartupValidation, State: "asserting", Err: ErrStartupValidation}
+	}
+	if err := s.validatePhysicalBackend(ctx, conn, expected); err != nil {
 		return err
 	}
-	if err := validateBackendIdentity(ctx, conn, s.expectedRuntime); err != nil {
-		return err
+	if !s.lifecycle.isReadyGeneration(generation) {
+		return &LayoutError{Code: LayoutErrorStartupValidation, State: "asserting", Err: ErrStartupValidation}
 	}
-	s.validatedBackends[physical] = struct{}{}
+	s.markBackendValidated(physical, generation)
 	return nil
+}
+
+func (s *SchemaManager) validatePhysicalBackend(ctx context.Context, conn *pgxpool.Conn, expected runtimeReadiness) (returnErr error) {
+	started := time.Now()
+	defer func() {
+		result, code := boundedErrorResult(returnErr)
+		s.observations.emit(Observation{Event: ObservationBackendValidation, Result: result,
+			LayoutErrorCode: code, StatementCount: 1, Duration: time.Since(started)})
+	}()
+	if err := validateBackendIdentity(ctx, conn, expected); err != nil {
+		return err
+	}
+	if err := AfterPooledConnectionEstablished(ctx, conn.Conn()); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *SchemaManager) markBackendValidated(conn *pgx.Conn, generation uint64) {
+	s.backendLock.Lock()
+	defer s.backendLock.Unlock()
+	s.backendClock++
+	s.validatedBackends[conn] = backendValidation{generation: generation, lastUsed: s.backendClock}
+	for len(s.validatedBackends) > s.maxValidatedBackends {
+		var oldest *pgx.Conn
+		var oldestUse uint64
+		for candidate, validation := range s.validatedBackends {
+			if candidate == conn {
+				continue
+			}
+			if oldest == nil || validation.lastUsed < oldestUse {
+				oldest = candidate
+				oldestUse = validation.lastUsed
+			}
+		}
+		if oldest == nil {
+			break
+		}
+		delete(s.validatedBackends, oldest)
+	}
+}
+
+func (s *SchemaManager) prepareBackendGeneration(generation uint64, expected runtimeReadiness) {
+	s.backendLock.Lock()
+	defer s.backendLock.Unlock()
+	s.validatedBackends = map[*pgx.Conn]backendValidation{}
+	s.backendGeneration = generation
+	s.expectedRuntime = expected
 }
 
 func (s *SchemaManager) clearValidatedBackends() {
 	s.backendLock.Lock()
 	defer s.backendLock.Unlock()
-	s.validatedBackends = map[*pgx.Conn]struct{}{}
+	s.validatedBackends = map[*pgx.Conn]backendValidation{}
+	s.backendGeneration = 0
 	s.expectedRuntime = runtimeReadiness{}
+}
+
+func discardPooledConnection(ctx context.Context, conn *pgxpool.Conn) {
+	physical := conn.Hijack()
+	_ = physical.Close(ctx)
 }
 
 func (s *SchemaManager) WriteTransaction(ctx context.Context, txDelegate graph.TransactionDelegate, options ...graph.TransactionOption) error {
@@ -130,7 +209,7 @@ func (s *SchemaManager) WriteTransaction(ctx context.Context, txDelegate graph.T
 	} else {
 		defer conn.Release()
 
-		if tx, err := newTransactionWrapper(ctx, conn, s, cfg, true); err != nil {
+		if tx, err := newTransactionWrapper(ctx, conn.Conn(), s, cfg, true); err != nil {
 			return err
 		} else {
 			defer tx.Close()
@@ -338,7 +417,7 @@ func (s *SchemaManager) ReadTransaction(ctx context.Context, txDelegate graph.Tr
 			schemaManager:   s,
 			queryExecMode:   cfg.QueryExecMode,
 			ctx:             ctx,
-			conn:            conn,
+			conn:            conn.Conn(),
 			targetSchemaSet: false,
 		})
 	}
@@ -433,6 +512,11 @@ func (s *SchemaManager) AssertKinds(ctx context.Context, kinds graph.Kinds) ([]i
 // transaction. The registry row and physical relation are therefore committed
 // or rolled back together and no cache entry can outlive failed DDL.
 func (s *SchemaManager) EnsureEdgeKindPartitions(tx graph.Transaction, graphID int32, kindIDs []int16) (map[int16]model.EdgeKindPartition, error) {
+	if pending, ok := tx.(*transaction); ok && pending.tx != nil && len(kindIDs) > 0 {
+		// Provisioning is idempotent, but an ambiguous commit may still have
+		// created a leaf. Fail closed until startup reasserts canonical topology.
+		pending.topologyTouched = true
+	}
 	started := time.Now()
 	partitions := make(map[int16]model.EdgeKindPartition, len(kindIDs))
 	seen := make(map[int16]struct{}, len(kindIDs))
@@ -518,6 +602,9 @@ func (s *SchemaManager) DefaultGraph() (model.Graph, bool) {
 
 func (s *SchemaManager) assertGraph(tx graph.Transaction, schema graph.Graph) (model.Graph, error) {
 	var assertedGraph model.Graph
+	if pending, ok := tx.(*transaction); ok && pending.tx != nil {
+		pending.topologyTouched = true
+	}
 
 	// Validate the schema if the graph already exists in the database
 	if definition, err := query.On(tx).SelectGraphByName(schema.Name); err != nil {
@@ -645,33 +732,34 @@ func (s *SchemaManager) assertSchema(tx graph.Transaction, schema graph.Schema) 
 // of this path deliberately.
 func (s *SchemaManager) reconcileAcceptedSchema(tx graph.Transaction, schema graph.Schema) error {
 	if err := s.fetch(tx); err != nil {
-		return err
+		return fmt.Errorf("refreshing accepted kinds: %w", err)
 	}
 
 	for _, graphSchema := range schema.Graphs {
 		if _, err := s.assertKindsInTransaction(tx.(*transaction), graphSchema.Nodes); err != nil {
-			return err
+			return fmt.Errorf("asserting node kinds for graph %q: %w", graphSchema.Name, err)
 		}
 		if _, err := s.assertKindsInTransaction(tx.(*transaction), graphSchema.Edges); err != nil {
-			return err
+			return fmt.Errorf("asserting edge kinds for graph %q: %w", graphSchema.Name, err)
 		}
 	}
 
 	for _, graphSchema := range schema.Graphs {
 		graphModel, err := query.On(tx).SelectGraphByName(graphSchema.Name)
 		if errors.Is(err, pgx.ErrNoRows) {
+			tx.(*transaction).topologyTouched = true
 			graphModel, err = query.On(tx).ProvisionGraph(graphSchema.Name)
 		}
 		if err != nil {
-			return err
+			return fmt.Errorf("selecting or provisioning graph %q: %w", graphSchema.Name, err)
 		}
 		kindIDs, err := s.assertKindsInTransaction(tx.(*transaction), graphSchema.Edges)
 		if err != nil {
-			return err
+			return fmt.Errorf("mapping edge kinds for graph %q: %w", graphSchema.Name, err)
 		}
 		leaves, err := s.EnsureEdgeKindPartitions(tx, graphModel.ID, kindIDs)
 		if err != nil {
-			return err
+			return fmt.Errorf("provisioning edge leaves for graph %q: %w", graphSchema.Name, err)
 		}
 		graphModel.Partitions.EdgeKindPartitions = leaves
 		tx.(*transaction).pendingGraphs[graphSchema.Name] = graphModel
@@ -691,16 +779,25 @@ func (s *SchemaManager) AssertRuntime(ctx context.Context) error {
 }
 
 func (s *SchemaManager) assertStartup(ctx context.Context, schema *graph.Schema) (returnErr error) {
-	s.startupLock.Lock()
-	defer s.startupLock.Unlock()
-	if s.closed.Load() {
-		return &LayoutError{Code: LayoutErrorStartupValidation, State: "closed", Err: ErrStartupValidation}
+	key, err := startupRequestKey(schema)
+	if err != nil {
+		return err
+	}
+	ticket, err := s.lifecycle.beginAssertion(ctx, key)
+	if ticket == nil {
+		return err
+	}
+	defer func() { ticket.finish(returnErr) }()
+	if err := ticket.waitForDrain(ctx); err != nil {
+		return err
+	}
+	if err := validateStaticSessionPool(s.pool); err != nil {
+		return err
 	}
 
 	started := time.Now()
 	var observedState string
 	var validationStatements int
-	s.startupReady.Store(false)
 	s.invalidateCaches()
 	s.clearValidatedBackends()
 	defer func() {
@@ -709,8 +806,8 @@ func (s *SchemaManager) assertStartup(ctx context.Context, schema *graph.Schema)
 			LayoutState: observedState, LayoutErrorCode: code, StatementCount: validationStatements,
 			Duration: time.Since(started)})
 		if returnErr != nil {
-			s.startupReady.Store(false)
 			s.invalidateCaches()
+			s.clearValidatedBackends()
 		}
 	}()
 
@@ -720,17 +817,6 @@ func (s *SchemaManager) assertStartup(ctx context.Context, schema *graph.Schema)
 	}
 	conn, err := s.pool.Acquire(ctx)
 	if err != nil {
-		return err
-	}
-	facts, err := classifyConnection(ctx, conn)
-	if err != nil {
-		conn.Release()
-		return err
-	}
-	observedState = string(facts.State)
-	validationStatements += facts.GuardStatements
-	if err := requireOperational(facts, schema != nil); err != nil {
-		conn.Release()
 		return err
 	}
 
@@ -744,6 +830,15 @@ func (s *SchemaManager) assertStartup(ctx context.Context, schema *graph.Schema)
 			// Serialize schema assertion across service instances while retaining
 			// transaction-scoped, automatically released ownership.
 			if _, err = tx.tx.Exec(ctx, "select pg_catalog.pg_advisory_xact_lock($1)", int64(0x44415747535632)); err != nil {
+				return err
+			}
+			facts, err := classifyQuerier(ctx, tx.tx)
+			if err != nil {
+				return err
+			}
+			observedState = string(facts.State)
+			validationStatements += facts.GuardStatements
+			if err := requireOperational(facts, true); err != nil {
 				return err
 			}
 
@@ -785,7 +880,29 @@ func (s *SchemaManager) assertStartup(ctx context.Context, schema *graph.Schema)
 			return err
 		}
 	} else {
+		tx, err := conn.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+		if err != nil {
+			conn.Release()
+			return err
+		}
+		if _, err = tx.Exec(ctx, "select pg_catalog.pg_advisory_xact_lock_shared($1)", int64(0x44415747535632)); err == nil {
+			var facts operationalFacts
+			facts, err = classifyQuerier(ctx, tx)
+			if err == nil {
+				observedState = string(facts.State)
+				validationStatements += facts.GuardStatements
+				err = requireOperational(facts, false)
+			}
+		}
+		if err == nil {
+			err = tx.Commit(ctx)
+		} else {
+			_ = tx.Rollback(ctx)
+		}
 		conn.Release()
+		if err != nil {
+			return err
+		}
 	}
 
 	// Schema DDL can replace composite OIDs. Drain all pre-assertion backends,
@@ -798,10 +915,12 @@ func (s *SchemaManager) assertStartup(ctx context.Context, schema *graph.Schema)
 	if err != nil {
 		return err
 	}
-	defer conn.Release()
-	if err := AfterPooledConnectionEstablished(ctx, conn.Conn()); err != nil {
-		return err
-	}
+	releasePostconditionConnection := true
+	defer func() {
+		if releasePostconditionConnection {
+			conn.Release()
+		}
+	}()
 	postFacts, err := classifyConnection(ctx, conn)
 	if err != nil {
 		return err
@@ -811,10 +930,16 @@ func (s *SchemaManager) assertStartup(ctx context.Context, schema *graph.Schema)
 	if err := requireOperational(postFacts, false); err != nil {
 		return err
 	}
-	s.backendLock.Lock()
-	s.expectedRuntime = postFacts.Readiness
-	s.validatedBackends[conn.Conn()] = struct{}{}
-	s.backendLock.Unlock()
+	if _, err := layoutHealth(ctx, conn, postFacts.Facts); err != nil {
+		return err
+	}
+	if err := s.validatePhysicalBackend(ctx, conn, postFacts.Readiness); err != nil {
+		discardPooledConnection(ctx, conn)
+		releasePostconditionConnection = false
+		return err
+	}
+	s.prepareBackendGeneration(ticket.generation(), postFacts.Readiness)
+	s.markBackendValidated(conn.Conn(), ticket.generation())
 
 	readWrapper, err := newTransactionWrapper(ctx, conn, s, &Config{
 		Options: readOnlyTxOptions, QueryExecMode: pgx.QueryExecModeSimpleProtocol,
@@ -826,6 +951,5 @@ func (s *SchemaManager) assertStartup(ctx context.Context, schema *graph.Schema)
 	if err := s.fetch(readWrapper); err != nil {
 		return err
 	}
-	s.startupReady.Store(true)
 	return nil
 }

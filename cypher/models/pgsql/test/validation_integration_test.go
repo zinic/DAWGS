@@ -36,6 +36,9 @@ func pgConnectionString(t *testing.T) string {
 		// CONNECTION_STRING selects one active backend for integration runs.
 		t.Skipf("%s is not a PostgreSQL connection string", connectionStringEnv)
 	}
+	if os.Getenv("DAWGS_TEST_POSTGRES_DISPOSABLE") == "1" && os.Getenv("PG_TEST_TARGET_CONNECTION_STRING") != "" {
+		connStr = os.Getenv("PG_TEST_TARGET_CONNECTION_STRING")
+	}
 
 	return connStr
 }

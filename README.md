@@ -128,8 +128,12 @@ bin/dawgs-pg-migrate complete-bootstrap --connection-file operator.json --migrat
 The final bootstrap and migration acceptance transaction uses the directly
 authenticated coordinator to transfer managed objects from the restricted
 operator to the distinct database-owning `NOLOGIN` role. The target receives
-only data privileges and the fixed-search-path graph/leaf provisioning
-routines; it never receives schema `CREATE`.
+only data privileges, database `CONNECT`/`TEMPORARY`, and the
+fixed-search-path graph/leaf provisioning routines; it never receives database
+or schema `CREATE`. `TEMPORARY` supports the existing invoker-security
+shortest-path scratch tables. Driver `Raw` SQL rejects caller-created temporary
+objects and persistent session-state changes so pooled backends cannot be
+poisoned.
 
 The runtime currently rejects all V2 activation, including accepted rehearsal
 states. Before

@@ -181,7 +181,8 @@ where n.nspname='public' order by t.tgrelid,t.oid`)
 func Routines(ctx context.Context, q Querier) ([]Routine, error) {
 	rows, err := q.Query(ctx, `select p.oid,n.nspname,p.proname,o.rolname,p.prokind::text,p.prosecdef,p.provolatile::text,p.proparallel::text,
 coalesce(p.proconfig,array[]::text[]),pg_catalog.pg_get_function_identity_arguments(p.oid),pg_catalog.pg_get_function_result(p.oid),
-case when p.prokind='a' then '' else pg_catalog.pg_get_functiondef(p.oid) end
+case when p.prokind='a' then '' else pg_catalog.pg_get_functiondef(p.oid) end,
+exists(select 1 from pg_catalog.pg_depend d where d.classid='pg_catalog.pg_proc'::pg_catalog.regclass and d.objid=p.oid and d.deptype='e')
 from pg_catalog.pg_proc p join pg_catalog.pg_namespace n on n.oid=p.pronamespace join pg_catalog.pg_roles o on o.oid=p.proowner
 where n.nspname='public' order by p.oid`)
 	if err != nil {
@@ -191,12 +192,44 @@ where n.nspname='public' order by p.oid`)
 	var out []Routine
 	for rows.Next() {
 		var v Routine
-		if err := rows.Scan(&v.OID, &v.Schema, &v.Name, &v.Owner, &v.Kind, &v.SecurityDefiner, &v.Volatility, &v.Parallel, &v.Configuration, &v.IdentityArguments, &v.Result, &v.Definition); err != nil {
+		if err := rows.Scan(&v.OID, &v.Schema, &v.Name, &v.Owner, &v.Kind, &v.SecurityDefiner, &v.Volatility, &v.Parallel, &v.Configuration, &v.IdentityArguments, &v.Result, &v.Definition, &v.Extension); err != nil {
 			return nil, err
 		}
 		out = append(out, v)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	acls, err := routineACLs(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	for index := range out {
+		out[index].ACL = acls[out[index].OID]
+	}
+	return out, nil
+}
+
+func routineACLs(ctx context.Context, q Querier) (map[uint32][]ACL, error) {
+	rows, err := q.Query(ctx, `select p.oid,grantor.rolname,coalesce(grantee.rolname,'PUBLIC'),a.privilege_type,a.is_grantable
+from pg_catalog.pg_proc p join pg_catalog.pg_namespace n on n.oid=p.pronamespace
+cross join lateral pg_catalog.aclexplode(coalesce(p.proacl,pg_catalog.acldefault('f',p.proowner))) a
+join pg_catalog.pg_roles grantor on grantor.oid=a.grantor left join pg_catalog.pg_roles grantee on grantee.oid=a.grantee
+where n.nspname='public' order by p.oid,a.grantee,a.privilege_type`)
+	if err != nil {
+		return nil, fmt.Errorf("reading routine ACL facts: %w", err)
+	}
+	defer rows.Close()
+	result := map[uint32][]ACL{}
+	for rows.Next() {
+		var oid uint32
+		var value ACL
+		if err := rows.Scan(&oid, &value.Grantor, &value.Grantee, &value.Privilege, &value.Grantable); err != nil {
+			return nil, err
+		}
+		result[oid] = append(result[oid], value)
+	}
+	return result, rows.Err()
 }
 
 func Sequences(ctx context.Context, q Querier) ([]Sequence, error) {

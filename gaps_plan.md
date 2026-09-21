@@ -599,14 +599,17 @@ Phases 2-4.
    - Operator atomically records the attempt and activates only a passed or
      explicitly approved fallback receipt. Fresh bootstrap records a canonical
      empty cleanup map and is never eligible for legacy cleanup.
-4. Centralize a same-physical-connection readiness guard. Apply it to:
+4. Centralize the ADR 0014 service-start lifecycle gate. Apply its local
+   operation admission and once-per-new-backend identity/type validation to:
    - Registered and direct constructors.
    - Pool establishment/reconnect and type registration.
    - Read/write transactions, BatchOperation, Raw, Run, maintenance, wipe,
      `Delete*ByKinds`, schema assertion, promoted manager methods, and external
      pools.
 5. Require exact accepted topology, current database identity/epoch, exact
-   target role, and current smoke receipt before application SQL.
+   target role, and current smoke receipt during startup assertion; ordinary
+   application SQL requires the published local lifecycle state and current
+   physical-backend identity mark.
 6. Reject operator, owner, old-writer, preparation, inherited-role,
    startup-`SET ROLE`, and runtime role/session-authorization changes.
 7. Load `public.*` composite types only after readiness succeeds on that same

@@ -54,6 +54,9 @@ func setupTestDB(t *testing.T) (graph.Database, context.Context) {
 	if isNeo4jConnectionString(connStr) {
 		t.Skipf("%s is not a PostgreSQL connection string", connectionStringEnv)
 	}
+	if os.Getenv("DAWGS_TEST_POSTGRES_DISPOSABLE") == "1" && os.Getenv("PG_TEST_TARGET_CONNECTION_STRING") != "" {
+		connStr = os.Getenv("PG_TEST_TARGET_CONNECTION_STRING")
+	}
 
 	poolCfg, err := pgxpool.ParseConfig(connStr)
 	if err != nil {

@@ -30,16 +30,13 @@ for transition recovery and lifecycle procedure.
 > authorization, and ADR 0012 numeric approvals are still missing. Diagnostic
 > checkpoints are not final-gate evidence.
 
-Implemented diagnostic checkpoints include a single-round-trip accepted guard,
-stable bounded guard observations, direct render-time graph scoping, exact
-typed path-hydration kind unions, idempotent existing graph/leaf provisioning,
-and read paths that do not provision leaves. The guard still recomputes the
-exhaustive structural topology in that one statement. It therefore preserves
-next-operation drift refusal, but it has not met WP2's topology-independent
-catalog/buffer bound. No cache is authorized. Closing that gate requires an
-authoritative cross-process runtime-contract token whose update coverage is
-proven for every supported DDL, ACL, registry, receipt, restore, and role
-mutation source.
+Implemented diagnostic checkpoints include exhaustive startup assertion,
+local warm-operation gating, once-per-new-backend identity/type checks, direct
+render-time graph scoping, exact typed path-hydration kind unions, idempotent
+existing graph/leaf provisioning, and read paths that do not provision leaves.
+ADR 0014 intentionally does not promise next-operation drift detection.
+Closing the lifecycle gate requires retained cancellation, concurrency,
+backend-churn, drain/reassert, and explicit fresh-`Readiness` evidence.
 
 The performance gate has four possible dispositions:
 
@@ -1657,7 +1654,7 @@ major, topology, correctness, or capacity failure.
 | Gate | Passing rule |
 |---|---|
 | Exact correctness | Zero result, path, duplicate, endpoint, graph-isolation, checksum, expected-error, or identity mismatches. |
-| Readiness/security | Zero stale/wrong-connection application operations; next-operation drift tests fail closed; target privileges and namespace match the approved role contract. |
+| Readiness/security | Startup assertions and new-backend identity checks fail closed; managed changes are drained and reasserted; explicit `Readiness` detects drift; target privileges and namespace match the approved role contract. |
 | Typed pruning | Typed counts/traversals retain healthy pruning, and typed path hydration touches exactly the statically known leaf union. |
 | Untyped correctness | No unsound pruning; dangling-endpoint semantics remain exact; approved maximum-topology budget passes. |
 | Median latency | Upper 95% confidence bound of V2/V1 is at or below the preapproved class/case ratio and the absolute upper bound meets its SLO. |

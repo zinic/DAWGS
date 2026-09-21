@@ -80,3 +80,46 @@ func TestTransactionCommitPublishesOnlyKnownSuccess(t *testing.T) {
 		})
 	}
 }
+
+func TestAmbiguousTopologyCommitDemotesRuntimeUntilReassertion(t *testing.T) {
+	manager := NewSchemaManager(nil, 0)
+	manager.lifecycle.phase = lifecycleReady
+	manager.lifecycle.generation = 7
+	manager.backendGeneration = 7
+	manager.validatedBackends[nil] = backendValidation{generation: 7}
+
+	tx := &transaction{
+		ctx:             context.Background(),
+		schemaManager:   manager,
+		tx:              &commitTestTx{commitErr: errors.New("connection lost during commit")},
+		topologyTouched: true,
+		pendingGraphs:   map[string]model.Graph{},
+		pendingKinds:    map[graph.Kind]int16{},
+		pendingKindIDs:  map[int16]graph.Kind{},
+	}
+	require.Error(t, tx.Commit())
+	_, err := manager.lifecycle.beginOperation()
+	require.ErrorIs(t, err, ErrStartupValidation)
+	require.Empty(t, manager.validatedBackends)
+	require.Zero(t, manager.backendGeneration)
+}
+
+func TestDefiniteTopologyRollbackKeepsAssertedGeneration(t *testing.T) {
+	manager := NewSchemaManager(nil, 0)
+	manager.lifecycle.phase = lifecycleReady
+	manager.lifecycle.generation = 7
+	tx := &transaction{
+		ctx:             context.Background(),
+		schemaManager:   manager,
+		tx:              &commitTestTx{commitErr: pgx.ErrTxCommitRollback},
+		topologyTouched: true,
+		pendingGraphs:   map[string]model.Graph{},
+		pendingKinds:    map[graph.Kind]int16{},
+		pendingKindIDs:  map[int16]graph.Kind{},
+	}
+	require.ErrorIs(t, tx.Commit(), pgx.ErrTxCommitRollback)
+	generation, err := manager.lifecycle.beginOperation()
+	require.NoError(t, err)
+	require.Equal(t, uint64(7), generation)
+	manager.lifecycle.endOperation()
+}

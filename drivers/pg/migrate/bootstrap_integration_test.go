@@ -4,6 +4,7 @@ package migrate
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"sync"
 	"testing"
@@ -135,6 +136,24 @@ values(1,1,10,11,1,'{}')`)
 		for assertionErr := range assertionErrors {
 			require.NoError(t, assertionErr)
 		}
+
+		secondTargetPool, err := pgxpool.New(ctx, targetConnection)
+		require.NoError(t, err)
+		secondTargetDriver := pgdriver.NewDriver(0, secondTargetPool)
+		independentAssertionErrors := make(chan error, 2)
+		go func() { independentAssertionErrors <- targetDriver.AssertSchema(ctx, rehearsalSchema) }()
+		go func() { independentAssertionErrors <- secondTargetDriver.AssertSchema(ctx, rehearsalSchema) }()
+		for range 2 {
+			require.NoError(t, <-independentAssertionErrors)
+		}
+		require.NoError(t, secondTargetDriver.Close(ctx))
+
+		backendValidationsBeforeReset := observations.backendValidationCount
+		targetPool.Reset()
+		require.NoError(t, targetDriver.ReadTransaction(ctx, func(graph.Transaction) error { return nil }))
+		require.Equal(t, backendValidationsBeforeReset+1, observations.backendValidationCount)
+		require.NoError(t, targetDriver.ReadTransaction(ctx, func(graph.Transaction) error { return nil }))
+		require.Equal(t, backendValidationsBeforeReset+1, observations.backendValidationCount)
 		provisioningBeforeRead := observations.leafProvisioningCount
 		require.NoError(t, targetDriver.ReadTransaction(ctx, func(tx graph.Transaction) error {
 			result := tx.WithGraph(rehearsalSchema.Graphs[0]).Query(`match ()-[r:REHEARSAL_EDGE_A]->() return count(r)`, nil)
@@ -166,6 +185,65 @@ values(1,1,10,11,1,'{}')`)
 		structured, err := pgdriver.DecodeStructuredExplain(explainJSON, inventory)
 		require.NoError(t, err)
 		require.ElementsMatch(t, inventory, structured.Leaves.Planned)
+
+		nodeKindID, err := targetDriver.KindMapper().MapKind(ctx, graph.StringKind("REHEARSAL_NODE"))
+		require.NoError(t, err)
+
+		// The target needs TEMPORARY for the invoker-security path helpers, but
+		// application Raw SQL cannot pre-poison a pooled backend with a shadow
+		// relation or persistent search_path change.
+		err = targetDriver.ReadTransaction(ctx, func(tx graph.Transaction) error {
+			result := tx.Raw(`create temporary table edge(id bigint)`, nil)
+			defer result.Close()
+			return result.Error()
+		})
+		require.ErrorContains(t, err, "temporary objects")
+		err = targetDriver.ReadTransaction(ctx, func(tx graph.Transaction) error {
+			result := tx.Raw(`set search_path=pg_temp,public`, nil)
+			defer result.Close()
+			return result.Error()
+		})
+		require.ErrorContains(t, err, "persist session state")
+
+		hostileConnection, err := targetPool.Acquire(ctx)
+		require.NoError(t, err)
+		hostileTx, err := hostileConnection.Begin(ctx)
+		require.NoError(t, err)
+		_, err = hostileTx.Exec(ctx, `create temporary table kind(id smallint,name text) on commit drop`)
+		require.NoError(t, err)
+		_, err = hostileTx.Exec(ctx, `insert into kind values($1,'SHADOWED')`, nodeKindID)
+		require.NoError(t, err)
+		_, err = hostileTx.Exec(ctx, `set local search_path=pg_temp,public`)
+		require.NoError(t, err)
+		var canonicalKindName string
+		require.NoError(t, hostileTx.QueryRow(ctx, `select public.kind_name($1)`, nodeKindID).Scan(&canonicalKindName))
+		require.Equal(t, "REHEARSAL_NODE", canonicalKindName)
+		require.NoError(t, hostileTx.Rollback(ctx))
+		hostileConnection.Release()
+
+		const startNodeID, endNodeID, shortestEdgeID int64 = 910001, 910002, 920001
+		_, err = targetPool.Exec(ctx, `insert into public.node(id,graph_id,kind_ids,properties) values
+($1,$3,array[$4]::int2[],'{"name":"shortest-start"}'),
+			($2,$3,array[$4]::int2[],'{"name":"shortest-end"}')`, startNodeID, endNodeID, rehearsalGraphID, nodeKindID)
+		require.NoError(t, err)
+		_, err = targetPool.Exec(ctx, `insert into public.edge(id,graph_id,start_id,end_id,kind_id,properties)
+values($1,$2,$3,$4,$5,'{}')`, shortestEdgeID, rehearsalGraphID, startNodeID, endNodeID, typedKindIDs[0])
+		require.NoError(t, err)
+		require.NoError(t, targetDriver.ReadTransaction(ctx, func(tx graph.Transaction) error {
+			result := tx.WithGraph(rehearsalSchema.Graphs[0]).Query(
+				`match p=shortestPath((s:REHEARSAL_NODE)-[:REHEARSAL_EDGE_A*1..]->(e:REHEARSAL_NODE)) where id(s)=$start_id and id(e)=$end_id return p`,
+				map[string]any{"start_id": startNodeID, "end_id": endNodeID})
+			defer result.Close()
+			if !result.Next() {
+				if err := result.Error(); err != nil {
+					return err
+				}
+				return fmt.Errorf("shortest-path query returned no path")
+			}
+			return result.Error()
+		}))
+		_, err = targetPool.Exec(ctx, `delete from public.node where graph_id=$1 and id=any($2::bigint[])`, rehearsalGraphID, []int64{startNodeID, endNodeID})
+		require.NoError(t, err)
 		require.NoError(t, targetDriver.ReadTransaction(ctx, func(graph.Transaction) error { return nil }))
 		require.Equal(t, "ok", observations.lastStartupValidation.Result)
 		require.Positive(t, observations.lastStartupValidation.StatementCount)
@@ -173,20 +251,52 @@ values(1,1,10,11,1,'{}')`)
 
 		admin, err := pgx.Connect(ctx, os.Getenv("PG_TEST_ADMIN_CONNECTION_STRING"))
 		require.NoError(t, err)
-		_, err = admin.Exec(ctx, `alter table public.edge disable trigger dawgs_10_claim_edge`)
-		require.NoError(t, err)
-		require.NoError(t, admin.Close(ctx))
-		// Warm transactions intentionally do not rescan topology. Explicit
-		// readiness and the next service-start assertion detect managed drift.
-		delegateCalled := false
-		require.NoError(t, targetDriver.ReadTransaction(ctx, func(graph.Transaction) error {
-			delegateCalled = true
-			return nil
-		}))
-		require.True(t, delegateCalled)
-		_, err = targetDriver.Readiness(ctx)
-		require.ErrorIs(t, err, pgdriver.ErrLayoutDrift)
-		require.ErrorIs(t, targetDriver.AssertRuntime(ctx), pgdriver.ErrLayoutDrift)
+		defer admin.Close(ctx)
+		ownerSQL := pgx.Identifier{os.Getenv("PG_TEST_OWNER_ROLE")}.Sanitize()
+		targetSQL := pgx.Identifier{os.Getenv("PG_TEST_TARGET_ROLE")}.Sanitize()
+		driftCases := []struct {
+			name   string
+			mutate string
+			repair string
+		}{
+			{"disabled trigger", `alter table public.edge disable trigger dawgs_10_claim_edge`, `alter table public.edge enable trigger dawgs_10_claim_edge`},
+			{"row security", `alter table public.edge enable row level security`, `alter table public.edge disable row level security`},
+			{"storage parameters", `alter table public.graph set (fillfactor=50)`, `alter table public.graph reset (fillfactor)`},
+			{"replica identity", `alter table public.graph replica identity full`, `alter table public.graph replica identity default`},
+			{"sequence cycle", `alter sequence public.graph_id_seq cycle`, `alter sequence public.graph_id_seq no cycle`},
+			{"security definer public ACL", `grant execute on function public.dawgs_provision_graph(text) to public`, `revoke execute on function public.dawgs_provision_graph(text) from public`},
+			{"rewrite rule", `create rule dawgs_drift_rule as on update to public.kind do also notify dawgs_drift`, `drop rule dawgs_drift_rule on public.kind`},
+			{"logical publication", `create publication dawgs_drift_publication`, `drop publication dawgs_drift_publication`},
+			{"target membership", fmt.Sprintf(`grant %s to %s`, ownerSQL, targetSQL), fmt.Sprintf(`revoke %s from %s`, ownerSQL, targetSQL)},
+			{"target search path", fmt.Sprintf(`alter role %s in database %s set search_path=public`, targetSQL, pgx.Identifier{os.Getenv("PG_TEST_DATABASE_NAME")}.Sanitize()), fmt.Sprintf(`alter role %s in database %s reset search_path`, targetSQL, pgx.Identifier{os.Getenv("PG_TEST_DATABASE_NAME")}.Sanitize())},
+			{"unsafe default ACL",
+				fmt.Sprintf(`alter default privileges for role %s in schema public grant select on tables to public`, ownerSQL),
+				fmt.Sprintf(`alter default privileges for role %s in schema public revoke select on tables from public`, ownerSQL)},
+		}
+		for _, driftCase := range driftCases {
+			t.Run("drift/"+driftCase.name, func(t *testing.T) {
+				_, err := admin.Exec(ctx, driftCase.mutate)
+				require.NoError(t, err)
+				t.Cleanup(func() { _, _ = admin.Exec(context.Background(), driftCase.repair) })
+
+				// Warm transactions intentionally do not rescan topology. Explicit
+				// readiness and the next service-start assertion detect managed drift.
+				delegateCalled := false
+				require.NoError(t, targetDriver.ReadTransaction(ctx, func(graph.Transaction) error {
+					delegateCalled = true
+					return nil
+				}))
+				require.True(t, delegateCalled)
+				_, err = targetDriver.Readiness(ctx)
+				require.ErrorIs(t, err, pgdriver.ErrLayoutDrift)
+				require.ErrorIs(t, targetDriver.AssertRuntime(ctx), pgdriver.ErrLayoutDrift)
+
+				_, err = admin.Exec(ctx, driftCase.repair)
+				require.NoError(t, err)
+				require.NoError(t, targetDriver.AssertRuntime(ctx))
+				require.NoError(t, targetDriver.ReadTransaction(ctx, func(graph.Transaction) error { return nil }))
+			})
+		}
 	} else {
 		require.ErrorIs(t, readinessErr, pgdriver.ErrActivationNotReady)
 		require.ErrorIs(t, targetDriver.AssertRuntime(ctx), pgdriver.ErrActivationNotReady)
@@ -195,10 +305,11 @@ values(1,1,10,11,1,'{}')`)
 }
 
 type bootstrapObservationSink struct {
-	lock                  sync.Mutex
-	lastStartupValidation pgdriver.Observation
-	leafProvisioningCount int
-	runtimeGuardCount     int
+	lock                   sync.Mutex
+	lastStartupValidation  pgdriver.Observation
+	leafProvisioningCount  int
+	runtimeGuardCount      int
+	backendValidationCount int
 }
 
 func (s *bootstrapObservationSink) Observe(observation pgdriver.Observation) {
@@ -209,6 +320,9 @@ func (s *bootstrapObservationSink) Observe(observation pgdriver.Observation) {
 	}
 	if observation.Event == pgdriver.ObservationRuntimeGuard {
 		s.runtimeGuardCount++
+	}
+	if observation.Event == pgdriver.ObservationBackendValidation {
+		s.backendValidationCount++
 	}
 	if observation.Event == pgdriver.ObservationLeafProvisioning {
 		s.leafProvisioningCount++

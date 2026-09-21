@@ -86,6 +86,9 @@ func TestPostgreSQLLiveAggregateTraversalCountPlanShape(t *testing.T) {
 	if driver != pg.DriverName {
 		t.Skipf("CONNECTION_STRING is not a PostgreSQL connection string")
 	}
+	if os.Getenv("DAWGS_TEST_POSTGRES_DISPOSABLE") == "1" {
+		connStr = bootstrapDisposablePostgres(t, context.Background(), connStr)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()

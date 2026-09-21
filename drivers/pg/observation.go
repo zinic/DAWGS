@@ -13,6 +13,7 @@ const (
 	ObservationLeafProvisioning  = "leaf_provisioning"
 	ObservationRuntimeGuard      = "runtime_guard"
 	ObservationStartupValidation = "startup_validation"
+	ObservationBackendValidation = "backend_validation"
 )
 
 // Observation is deliberately bounded-cardinality. It contains no database,

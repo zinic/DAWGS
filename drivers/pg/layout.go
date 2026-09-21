@@ -10,31 +10,35 @@ import (
 )
 
 var (
-	ErrMigrationRequired   = errors.New("PostgreSQL schema migration required")
-	ErrMigrationInProgress = errors.New("PostgreSQL schema migration in progress")
-	ErrSchemaUninitialized = errors.New("PostgreSQL schema is uninitialized")
-	ErrLayoutDrift         = errors.New("PostgreSQL schema layout drift")
-	ErrPendingAcceptance   = errors.New("PostgreSQL schema pending acceptance")
-	ErrSmokePending        = errors.New("PostgreSQL target smoke is not current and passed")
-	ErrWrongRuntimeRole    = errors.New("PostgreSQL session is not the recorded runtime target")
-	ErrRestoreRebind       = errors.New("PostgreSQL database identity changed; restore rebind required")
-	ErrActivationNotReady  = errors.New("PostgreSQL V2 activation gate is not ready")
-	ErrStartupValidation   = errors.New("PostgreSQL startup validation has not completed")
+	ErrMigrationRequired        = errors.New("PostgreSQL schema migration required")
+	ErrMigrationInProgress      = errors.New("PostgreSQL schema migration in progress")
+	ErrSchemaUninitialized      = errors.New("PostgreSQL schema is uninitialized")
+	ErrLayoutDrift              = errors.New("PostgreSQL schema layout drift")
+	ErrPendingAcceptance        = errors.New("PostgreSQL schema pending acceptance")
+	ErrSmokePending             = errors.New("PostgreSQL target smoke is not current and passed")
+	ErrWrongRuntimeRole         = errors.New("PostgreSQL session is not the recorded runtime target")
+	ErrRestoreRebind            = errors.New("PostgreSQL database identity changed; restore rebind required")
+	ErrActivationNotReady       = errors.New("PostgreSQL V2 activation gate is not ready")
+	ErrStartupValidation        = errors.New("PostgreSQL startup validation has not completed")
+	ErrStartupAssertionConflict = errors.New("a different PostgreSQL startup assertion is already in progress")
+	ErrUnsafePoolHooks          = errors.New("PostgreSQL pool checkout hooks can change session identity")
 )
 
 type LayoutErrorCode string
 
 const (
-	LayoutErrorMigrationRequired   LayoutErrorCode = "migration_required"
-	LayoutErrorMigrationInProgress LayoutErrorCode = "migration_in_progress"
-	LayoutErrorSchemaUninitialized LayoutErrorCode = "schema_uninitialized"
-	LayoutErrorDrift               LayoutErrorCode = "layout_drift"
-	LayoutErrorPendingAcceptance   LayoutErrorCode = "pending_acceptance"
-	LayoutErrorSmokePending        LayoutErrorCode = "smoke_pending"
-	LayoutErrorWrongRuntimeRole    LayoutErrorCode = "wrong_runtime_role"
-	LayoutErrorRestoreRebind       LayoutErrorCode = "restore_rebind_required"
-	LayoutErrorActivationNotReady  LayoutErrorCode = "activation_not_ready"
-	LayoutErrorStartupValidation   LayoutErrorCode = "startup_validation_required"
+	LayoutErrorMigrationRequired        LayoutErrorCode = "migration_required"
+	LayoutErrorMigrationInProgress      LayoutErrorCode = "migration_in_progress"
+	LayoutErrorSchemaUninitialized      LayoutErrorCode = "schema_uninitialized"
+	LayoutErrorDrift                    LayoutErrorCode = "layout_drift"
+	LayoutErrorPendingAcceptance        LayoutErrorCode = "pending_acceptance"
+	LayoutErrorSmokePending             LayoutErrorCode = "smoke_pending"
+	LayoutErrorWrongRuntimeRole         LayoutErrorCode = "wrong_runtime_role"
+	LayoutErrorRestoreRebind            LayoutErrorCode = "restore_rebind_required"
+	LayoutErrorActivationNotReady       LayoutErrorCode = "activation_not_ready"
+	LayoutErrorStartupValidation        LayoutErrorCode = "startup_validation_required"
+	LayoutErrorStartupAssertionConflict LayoutErrorCode = "startup_assertion_conflict"
+	LayoutErrorUnsafePoolHooks          LayoutErrorCode = "unsafe_pool_session_hooks"
 )
 
 type LayoutError struct {
@@ -115,41 +119,27 @@ func classifyPool(ctx context.Context, pool *pgxpool.Pool) (layout.Facts, error)
 }
 
 func classifyConnection(ctx context.Context, conn *pgxpool.Conn) (operationalFacts, error) {
-	accepted, fastErr := layout.ClassifyAccepted(ctx, conn)
-	if fastErr == nil && accepted.Accepted {
-		return operationalFacts{
-			Facts:     accepted.Facts,
-			Readiness: readinessFromIdentity(accepted.Identity),
-		}, nil
-	}
-	if ctx.Err() != nil {
-		return operationalFacts{}, fastErr
-	}
+	return classifyQuerier(ctx, conn)
+}
 
-	facts, err := layout.Classify(ctx, conn)
+func classifyQuerier(ctx context.Context, queryer layout.Querier) (operationalFacts, error) {
+	// Establish the layout shape before issuing the accepted-state query. The
+	// accepted query necessarily names V2 relations; using its expected
+	// undefined-relation error as flow control would abort a caller-owned
+	// PostgreSQL transaction before the fallback classifier could run.
+	facts, err := layout.Classify(ctx, queryer)
 	if err != nil || facts.State != layout.StateV2Accepted {
 		return operationalFacts{Facts: facts}, err
 	}
-	readiness := runtimeReadiness{Checked: true}
-	facts.GuardStatements++
-	err = conn.QueryRow(ctx, `/* dawgs:guard/identity */ select
-coalesce(l.database_oid,0),coalesce(l.database_name,''),coalesce(l.system_identifier,''),
-coalesce(l.target_role_oid,0),coalesce(l.target_role_name,''),l.post_acceptance_smoke_status,
-coalesce(l.current_smoke_receipt_digest,''),d.oid,d.datname,
-(pg_catalog.pg_control_system()).system_identifier::text,r.oid,r.rolname,
-session_user::text,current_user::text,r.rolsuper,d.datdba,
-exists(select 1 from pg_catalog.pg_auth_members m where m.member=r.oid)
-from public.dawgs_schema_layout l
-join pg_catalog.pg_database d on d.datname=pg_catalog.current_database()
-join pg_catalog.pg_roles r on r.rolname=session_user
-where l.singleton`).Scan(
-		&readiness.RecordedDatabaseOID, &readiness.RecordedDatabaseName, &readiness.RecordedSystemIdentifier,
-		&readiness.RecordedTargetRoleOID, &readiness.RecordedTargetRoleName, &readiness.SmokeStatus,
-		&readiness.SmokeReceiptDigest, &readiness.CurrentDatabaseOID, &readiness.CurrentDatabaseName,
-		&readiness.CurrentSystemIdentifier, &readiness.CurrentRoleOID, &readiness.CurrentRoleName,
-		&readiness.SessionUser, &readiness.CurrentUser, &readiness.CurrentRoleSuperuser,
-		&readiness.CurrentDatabaseOwnerOID, &readiness.CurrentRoleHasMembership)
-	return operationalFacts{Facts: facts, Readiness: readiness}, err
+	accepted, err := layout.ClassifyAccepted(ctx, queryer)
+	if err != nil {
+		return operationalFacts{Facts: facts}, err
+	}
+	if !accepted.Accepted {
+		return operationalFacts{Facts: facts}, &LayoutError{Code: LayoutErrorDrift, State: string(facts.State), Err: ErrLayoutDrift}
+	}
+	accepted.Facts.GuardStatements += facts.GuardStatements
+	return operationalFacts{Facts: accepted.Facts, Readiness: readinessFromIdentity(accepted.Identity)}, nil
 }
 
 func readinessFromIdentity(identity layout.RuntimeIdentity) runtimeReadiness {

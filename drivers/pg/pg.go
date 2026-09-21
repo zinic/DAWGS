@@ -59,25 +59,10 @@ func NewPool(poolCfg *pgxpool.Config) (*pgxpool.Pool, error) {
 	poolCfg.MinConns = 5
 	poolCfg.MaxConns = 50
 
-	// Bind functions to the AfterConnect and AfterRelease hooks to ensure that composite type registration occurs.
-	// Without composite type registration, the pgx connection type will not be able to marshal PG OIDs to their
-	// respective Golang structs.
-	callerAfterConnect := poolCfg.AfterConnect
-	callerAfterRelease := poolCfg.AfterRelease
-	poolCfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
-		if callerAfterConnect != nil {
-			if err := callerAfterConnect(ctx, conn); err != nil {
-				return err
-			}
-		}
-		return AfterPooledConnectionEstablished(ctx, conn)
-	}
-	poolCfg.AfterRelease = func(conn *pgx.Conn) bool {
-		if callerAfterRelease != nil && !callerAfterRelease(conn) {
-			return false
-		}
-		return AfterPooledConnectionRelease(conn)
-	}
+	// Composite registration is intentionally deferred until startup has
+	// accepted the database and the exact physical backend identity. This keeps
+	// operator/prebootstrap pools raw and makes the acquisition path authoritative
+	// for pools that were not constructed by this helper.
 
 	pool, err := pgxpool.NewWithConfig(poolCtx, poolCfg)
 	if err != nil {
@@ -85,6 +70,17 @@ func NewPool(poolCfg *pgxpool.Config) (*pgxpool.Pool, error) {
 	}
 
 	return pool, nil
+}
+
+func validateStaticSessionPool(pool *pgxpool.Pool) error {
+	if pool == nil {
+		return fmt.Errorf("PostgreSQL pool is nil")
+	}
+	cfg := pool.Config()
+	if cfg.BeforeAcquire != nil || cfg.PrepareConn != nil || cfg.AfterRelease != nil {
+		return &LayoutError{Code: LayoutErrorUnsafePoolHooks, State: "unasserted", Err: ErrUnsafePoolHooks}
+	}
+	return nil
 }
 
 func init() {

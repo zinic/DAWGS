@@ -93,6 +93,8 @@ type Routine struct {
 	IdentityArguments string
 	Result            string
 	Definition        string
+	Extension         bool
+	ACL               []ACL
 }
 
 type Sequence struct {

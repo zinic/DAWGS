@@ -442,7 +442,15 @@ query.
 - Cold backend, warm backend, cold statement, and warm statement are separate
   populations.
 
-## WP2: reduce the accepted runtime gate to one bounded exact statement
+## Historical WP2: per-operation guard optimization (superseded)
+
+This section is retained only to explain the measurements and design path that
+led to ADR 0014. It is not an implementation or release gate. The operative
+contract is exhaustive `AssertSchema`/`AssertRuntime` validation before
+traffic, a local lifecycle gate on ordinary operations, one narrow identity
+and type check for each new physical backend, explicit fresh `Readiness`, and
+drain/restart/reassert after managed changes. References below to one hot guard
+statement or next-operation drift detection are historical requirements.
 
 This is the highest-priority implementation package.
 
@@ -1066,9 +1074,9 @@ of the following are also true:
 - Accepted V2 benchmarks run without ad hoc schema, privilege, graph, analyze,
   or activation patches; any pre-activation rehearsal seam is formally
   non-shipping and the promoted artifact is rerun without it.
-- The accepted warm runtime hot path uses one topology-bounded exact guard
-  statement, or a separately approved stronger design, and every required
-  next-operation drift test fails closed.
+- The accepted warm runtime hot path performs no exhaustive guard SQL; startup
+  assertion, new-backend identity/type checks, and explicit `Readiness` meet
+  ADR 0014, including drain/restart/reassert coverage for managed changes.
 - The fixed client, guard, PostgreSQL plan, execution, scan, and commit phases
   are individually measured.
 - Typed node/edge plans remain healthy; typed path hydration uses the exact

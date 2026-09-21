@@ -90,7 +90,7 @@ func (s *Driver) BatchOperation(ctx context.Context, batchDelegate graph.BatchDe
 	} else {
 		defer conn.Release()
 
-		if batch, err := newBatch(ctx, conn, s.SchemaManager, cfg); err != nil {
+		if batch, err := newBatch(ctx, conn.Conn(), s.SchemaManager, cfg); err != nil {
 			return err
 		} else {
 			defer batch.Close()
@@ -145,6 +145,13 @@ func layoutHealth(ctx context.Context, queryer layoutHealthQuerier, facts layout
 		if err != nil {
 			return LayoutHealth{}, err
 		}
+		if facts.State == layout.StateV2Accepted {
+			health.Drift = append(health.Drift, layout.ValidateAcceptedSnapshot(snapshot, health.OwnerRoleName, health.TargetRoleName)...)
+			if len(health.Drift) != 0 {
+				return health, &LayoutError{Code: LayoutErrorDrift, State: string(facts.State),
+					Err: fmt.Errorf("%w: %s", ErrLayoutDrift, strings.Join(health.Drift, "; "))}
+			}
+		}
 	}
 	return health, nil
 }
@@ -171,7 +178,7 @@ func (s *Driver) Readiness(ctx context.Context) (LayoutHealth, error) {
 	if err != nil {
 		result, code := boundedErrorResult(err)
 		s.SchemaManager.observations.emit(Observation{Event: ObservationReadiness, Result: result, LayoutErrorCode: code, Duration: time.Since(started)})
-		return LayoutHealth{}, err
+		return health, err
 	}
 	readinessErr := requireOperational(facts, false)
 	result, code := boundedErrorResult(readinessErr)
@@ -183,11 +190,14 @@ func (s *Driver) Readiness(ctx context.Context) (LayoutHealth, error) {
 }
 
 func (s *Driver) Close(ctx context.Context) error {
-	s.SchemaManager.startupLock.Lock()
-	defer s.SchemaManager.startupLock.Unlock()
-	s.SchemaManager.closed.Store(true)
-	s.SchemaManager.startupReady.Store(false)
-	s.pool.Close()
+	if err := s.SchemaManager.lifecycle.close(ctx); err != nil {
+		return err
+	}
+	s.SchemaManager.invalidateCaches()
+	s.SchemaManager.clearValidatedBackends()
+	if s.pool != nil {
+		s.pool.Close()
+	}
 	return nil
 }
 
@@ -251,11 +261,10 @@ func (s *Driver) FetchKinds(_ context.Context) (graph.Kinds, error) {
 
 func (s *Driver) RefreshKinds(ctx context.Context) error {
 	s.lock.Lock()
-	defer s.lock.Unlock()
-
 	// Wipe both directions so removed catalog rows cannot survive refresh.
 	s.SchemaManager.kindsByID = map[graph.Kind]int16{}
 	s.SchemaManager.kindIDsByKind = map[int16]graph.Kind{}
+	s.lock.Unlock()
 	return s.SchemaManager.Fetch(ctx)
 }
 
@@ -266,7 +275,7 @@ func (s *Driver) OptimizeStorage(ctx context.Context) error {
 	}
 	defer conn.Release()
 
-	return optimizeStorage(ctx, conn)
+	return optimizeStorage(ctx, conn.Conn())
 }
 
 // WipeGraph truncates the partitioned node and edge tables, removing every node and edge across all graphs in a single
@@ -406,7 +415,7 @@ func (s *Driver) execDelete(ctx context.Context, label, statement string, argume
 	}
 	defer conn.Release()
 
-	if _, err := conn.Exec(ctx, statement, arguments...); err != nil {
+	if _, err := conn.Conn().Exec(ctx, statement, arguments...); err != nil {
 		return fmt.Errorf("%s: %w", statement, err)
 	}
 

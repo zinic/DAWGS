@@ -30,6 +30,15 @@ func TestOperationsRefuseLocallyBeforeStartupAssertion(t *testing.T) {
 		func() error { return driver.WipeGraph(ctx, nil) },
 		func() error { return driver.OptimizeStorage(ctx) },
 		func() error { return driver.DeleteNodesByKinds(ctx, nil, nil) },
+		func() error { return driver.DeleteRelationshipsByKinds(ctx, graph.Kinds{graph.StringKind("EDGE")}) },
+		func() error { return driver.SetDefaultGraph(ctx, graph.Graph{Name: "default"}) },
+		func() error { return driver.RefreshKinds(ctx) },
+		func() error { return driver.SchemaManager.Fetch(ctx) },
+		func() error { _, err := driver.MapKind(ctx, graph.StringKind("KIND")); return err },
+		func() error { _, err := driver.MapKinds(ctx, graph.Kinds{graph.StringKind("KIND")}); return err },
+		func() error { _, err := driver.MapKindID(ctx, 1); return err },
+		func() error { _, err := driver.MapKindIDs(ctx, []int16{1}); return err },
+		func() error { _, err := driver.AssertKinds(ctx, graph.Kinds{graph.StringKind("KIND")}); return err },
 	}
 	for _, operation := range operations {
 		require.ErrorIs(t, operation(), ErrStartupValidation)
@@ -41,11 +50,32 @@ func TestSessionIdentityStatementsAreRejected(t *testing.T) {
 	for _, statement := range []string{
 		"SET ROLE operator", " reset role", "SET SESSION AUTHORIZATION operator",
 		"RESET SESSION AUTHORIZATION", "select set_config('role', 'operator', false)",
-		"/* caller */ SET ROLE operator", "DISCARD ALL",
+		"/* caller */ SET ROLE operator", "DISCARD ALL", "SET SESSION ROLE operator",
+		"SET LOCAL /* split */ ROLE operator", "select 1; set role operator",
+		"select pg_catalog.set_config('session_authorization', 'operator', false)",
+		"select set_config($1, 'operator', false)", "select set_config($$role$$, 'operator', false)",
+		"select set_config('work_mem', '4MB', true)", "SET work_mem = '4MB'",
+		"RESET ALL", "CREATE TEMP TABLE edge(id bigint)",
+		"DO $$ begin execute 'set role operator'; end $$",
 	} {
 		require.True(t, isSessionIdentityStatement(statement), statement)
 	}
-	require.False(t, isSessionIdentityStatement("select 'set role operator'"))
+	for _, statement := range []string{
+		"select 'set role operator'",
+		"set local work_mem = '4MB'", "select reset, role from application_table",
+		"insert into application_table(id) values(1) on conflict(id) do nothing",
+	} {
+		require.False(t, isSessionIdentityStatement(statement), statement)
+	}
+}
+
+func FuzzSessionIdentityStatementScanner(f *testing.F) {
+	for _, seed := range []string{"", "select 1", "/* nested /* comment */ */ set role x", "select 'unterminated"} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, statement string) {
+		_ = isSessionIdentityStatement(statement)
+	})
 }
 
 func TestRequireOperationalRefusesEveryTransitionState(t *testing.T) {

@@ -29,6 +29,7 @@ func TestPostgresPublicCompatibilityContract(t *testing.T) {
 		pg.ErrMigrationRequired, pg.ErrMigrationInProgress, pg.ErrSchemaUninitialized,
 		pg.ErrLayoutDrift, pg.ErrPendingAcceptance, pg.ErrSmokePending, pg.ErrWrongRuntimeRole,
 		pg.ErrRestoreRebind, pg.ErrActivationNotReady, pg.ErrStartupValidation,
+		pg.ErrStartupAssertionConflict, pg.ErrUnsafePoolHooks,
 	} {
 		require.NotNil(t, typed)
 	}

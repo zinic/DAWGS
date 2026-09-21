@@ -19,6 +19,7 @@
 package integration
 
 import (
+	"context"
 	"errors"
 	"os"
 	"testing"
@@ -39,6 +40,9 @@ func TestPostgreSQLCountStoreFastPathRequiresRelationshipEndpoints(t *testing.T)
 	}
 	if driver != pg.DriverName {
 		t.Skip("CONNECTION_STRING is not a PostgreSQL connection string")
+	}
+	if os.Getenv("DAWGS_TEST_POSTGRES_DISPOSABLE") == "1" {
+		connStr = bootstrapDisposablePostgres(t, context.Background(), connStr)
 	}
 
 	var (

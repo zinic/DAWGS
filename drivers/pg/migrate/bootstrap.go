@@ -27,6 +27,13 @@ func (s *Engine) Bootstrap(ctx context.Context) (Report, error) {
 	if !s.AllowUnreleasedDisposable {
 		return Report{}, fmt.Errorf("activation_not_ready: unreleased bootstrap is restricted to the identity-guarded disposable test harness")
 	}
+	var serverVersion int
+	if err := s.Pool.QueryRow(ctx, `select pg_catalog.current_setting('server_version_num')::integer`).Scan(&serverVersion); err != nil {
+		return Report{}, fmt.Errorf("reading PostgreSQL version for bootstrap: %w", err)
+	}
+	if err := validatePostgresVersion(serverVersion); err != nil {
+		return Report{}, err
+	}
 	connection, err := s.Pool.Acquire(ctx)
 	if err != nil {
 		return Report{}, err
@@ -231,6 +238,9 @@ where singleton and state='v2_pending_handoff' and bootstrap_operation_id=$1`, o
 	}
 	if tag.RowsAffected() != 1 {
 		return Report{}, fmt.Errorf("bootstrap handoff pointer changed concurrently")
+	}
+	if err := validateAcceptedCatalog(ctx, tx, owner.Name, facts.TargetRoleName); err != nil {
+		return Report{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return Report{}, fmt.Errorf("commit_outcome_unknown: %w", err)

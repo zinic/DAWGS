@@ -3,8 +3,11 @@ package migrate
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/specterops/dawgs/drivers/pg/internal/catalog"
+	"github.com/specterops/dawgs/drivers/pg/internal/layout"
 )
 
 type ownerIdentity struct {
@@ -57,10 +60,17 @@ func transferManagedOwnership(ctx context.Context, tx pgx.Tx, operator sessionId
 	operatorSQL := pgx.Identifier{operator.RoleName}.Sanitize()
 	ownerSQL := pgx.Identifier{owner.Name}.Sanitize()
 	targetSQL := pgx.Identifier{targetRole}.Sanitize()
+	var databaseName string
+	if err := tx.QueryRow(ctx, `select pg_catalog.current_database()`).Scan(&databaseName); err != nil {
+		return fmt.Errorf("reading database name for target privileges: %w", err)
+	}
+	databaseSQL := pgx.Identifier{databaseName}.Sanitize()
 	if _, err := tx.Exec(ctx, fmt.Sprintf(`reassign owned by %s to %s`, operatorSQL, ownerSQL)); err != nil {
 		return fmt.Errorf("transferring managed object ownership: %w", err)
 	}
 	statements := []string{
+		fmt.Sprintf(`revoke create on database %s from %s`, databaseSQL, targetSQL),
+		fmt.Sprintf(`grant connect,temporary on database %s to %s`, databaseSQL, targetSQL),
 		fmt.Sprintf(`revoke create on schema public from public,%s,%s`, operatorSQL, targetSQL),
 		fmt.Sprintf(`grant usage on schema public to %s,%s`, operatorSQL, targetSQL),
 		fmt.Sprintf(`grant select on all tables in schema public to %s`, operatorSQL),
@@ -92,6 +102,17 @@ func transferManagedOwnership(ctx context.Context, tx pgx.Tx, operator sessionId
 	}
 	if foreignRelations != 0 || foreignRoutines != 0 {
 		return fmt.Errorf("owner handoff left %d relations and %d routines under another owner", foreignRelations, foreignRoutines)
+	}
+	return nil
+}
+
+func validateAcceptedCatalog(ctx context.Context, tx pgx.Tx, ownerRole, targetRole string) error {
+	snapshot, err := catalog.ReadSnapshot(ctx, tx)
+	if err != nil {
+		return fmt.Errorf("reading accepted catalog postcondition: %w", err)
+	}
+	if drift := layout.ValidateAcceptedSnapshot(snapshot, ownerRole, targetRole); len(drift) != 0 {
+		return fmt.Errorf("accepted catalog postcondition failed: %s", strings.Join(drift, "; "))
 	}
 	return nil
 }

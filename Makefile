@@ -60,7 +60,7 @@ QUALITY_INPUTS += -mutation-report $(MUTATION_REPORT)
 endif
 QUALITY_INPUTS += -benchmark-regression $(BENCHMARK_REGRESSION)
 
-.PHONY: default all build build_pg_migrate migration_artifact migration_preflight_fixture verify_frozen_v1_client benchmark_transition deps tidy lint format test test_all test_integration test_integration_pg_temp prepare_test_pg test_postgres_harness test_transition_containment test_migration test_bootstrap test_restore test_restore_independent test_rollback test_pg_physical test_neo4j test_pg test_update plan_corpus complexity complexity_check crap crap_check quality quality_check quality_backend quality_bench metrics metrics_check generate clean help
+.PHONY: default all build build_pg_migrate migration_artifact migration_preflight_fixture verify_frozen_v1_client benchmark_transition deps tidy lint format test test_all test_integration test_integration_pg_temp prepare_test_pg test_postgres_harness test_transition_containment test_migration test_bootstrap test_restore test_restore_independent test_rollback test_pg_physical test_pg_runtime_rehearsal test_neo4j test_pg test_update plan_corpus complexity complexity_check crap crap_check quality quality_check quality_backend quality_bench metrics metrics_check generate clean help
 
 # Default target
 default: help
@@ -134,16 +134,16 @@ test_postgres_harness:
 	@$(GO_CMD) test -tags pg_harness -race -count=1 ./scripts
 
 test_transition_containment:
-	@$(GO_CMD) test -tags transition_containment -race -count=1 ./drivers/pg
+	@$(GO_CMD) test -tags 'transition_containment $(TEST_TAGS)' -race -count=1 ./drivers/pg
 
 test_migration:
-	@$(GO_CMD) test -tags migration_integration -race -count=1 ./drivers/pg/migrate
+	@$(GO_CMD) test -tags 'migration_integration $(TEST_TAGS)' -race -count=1 ./drivers/pg/migrate
 
 test_bootstrap:
-	@$(GO_CMD) test -tags bootstrap_integration -race -count=1 ./drivers/pg/migrate
+	@$(GO_CMD) test -tags 'bootstrap_integration $(TEST_TAGS)' -race -count=1 ./drivers/pg/migrate
 
 test_restore:
-	@$(GO_CMD) test -tags restore_integration -race -count=1 ./drivers/pg/migrate
+	@$(GO_CMD) test -tags 'restore_integration $(TEST_TAGS)' -race -count=1 ./drivers/pg/migrate
 
 test_restore_independent:
 	@if [ -n "$${PG_TEST_RESTORE_SOURCE_ADMIN:-}" ] && [ -n "$${PG_TEST_RESTORE_TARGET_ADMIN:-}" ]; then \
@@ -153,10 +153,13 @@ test_restore_independent:
 	fi
 
 test_rollback:
-	@$(GO_CMD) test -tags rollback_integration -race -count=1 ./drivers/pg/migrate
+	@$(GO_CMD) test -tags 'rollback_integration $(TEST_TAGS)' -race -count=1 ./drivers/pg/migrate
 
 test_pg_physical:
-	@$(GO_CMD) test -tags pg_physical -run '^TestPGPhysical' -race -count=1 -p=1 ./drivers/pg/... ./integration/...
+	@$(GO_CMD) test -tags 'pg_physical $(TEST_TAGS)' -run '^TestPGPhysical' -race -count=1 -p=1 ./drivers/pg/... ./integration/...
+
+test_pg_runtime_rehearsal:
+	@$(GO_CMD) test -tags 'bootstrap_integration dawgs_rehearsal $(TEST_TAGS)' -race -count=1 ./drivers/pg/migrate
 
 test_bench:
 	@echo "Running benchmarks..."

@@ -414,6 +414,9 @@ func (s Query) SelectKindID(kind graph.Kind) (int16, error) {
 	defer result.Close()
 
 	if !result.Next() {
+		if err := result.Error(); err != nil {
+			return -1, err
+		}
 		return -1, pgx.ErrNoRows
 	}
 
@@ -621,6 +624,9 @@ func (s Query) InsertOrGetKind(kind graph.Kind) (int16, error) {
 	defer result.Close()
 
 	if !result.Next() {
+		if err := result.Error(); err != nil {
+			return -1, err
+		}
 		return -1, pgx.ErrNoRows
 	}
 

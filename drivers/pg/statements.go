@@ -15,7 +15,8 @@ const (
 	createNodeWithoutIDBatchStatement = `insert into %s (graph_id, kind_ids, properties) select $1, pg_catalog.unnest($2::text[])::int2[], pg_catalog.unnest($3::jsonb[])`
 	createNodesReturningIDsStatement  = `with input as (
 select ordinality, kind_ids, properties
-from pg_catalog.unnest($2::text[], $3::jsonb[]) with ordinality as rows(kind_ids, properties, ordinality)
+from rows from (pg_catalog.unnest($2::text[]), pg_catalog.unnest($3::jsonb[]))
+with ordinality as rows(kind_ids, properties, ordinality)
 ), prepared as materialized (
 select ordinality, pg_catalog.nextval(pg_catalog.pg_get_serial_sequence('public.node', 'id')) as id, kind_ids::int2[] as kind_ids, properties
 from input

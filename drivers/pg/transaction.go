@@ -2,8 +2,8 @@ package pg
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/specterops/dawgs/cypher/models/pgsql"
 	"github.com/specterops/dawgs/cypher/models/pgsql/translate"
@@ -57,6 +57,7 @@ type transaction struct {
 	pendingKindIDs     map[int16]graph.Kind
 	pendingDefault     *model.Graph
 	pendingDefaultName string
+	topologyTouched    bool
 	writable           bool
 }
 
@@ -321,7 +322,7 @@ func (s *transaction) Query(query string, parameters map[string]any) graph.Resul
 
 func (s *transaction) Raw(query string, parameters map[string]any) graph.Result {
 	if isSessionIdentityStatement(query) {
-		return graph.NewErrorResult(fmt.Errorf("PostgreSQL runtime sessions may not change role or session authorization"))
+		return graph.NewErrorResult(fmt.Errorf("PostgreSQL runtime sessions may not persist session state or create temporary objects"))
 	}
 	if rows, err := s.query(query, parameters); err != nil {
 		return graph.NewErrorResult(err)
@@ -332,33 +333,6 @@ func (s *transaction) Raw(query string, parameters map[string]any) graph.Result 
 			kindMapper: s,
 		}
 	}
-}
-
-func isSessionIdentityStatement(statement string) bool {
-	normalized := strings.ToLower(strings.TrimSpace(statement))
-	for {
-		switch {
-		case strings.HasPrefix(normalized, "--"):
-			if newline := strings.IndexByte(normalized, '\n'); newline >= 0 {
-				normalized = strings.TrimSpace(normalized[newline+1:])
-				continue
-			}
-		case strings.HasPrefix(normalized, "/*"):
-			if end := strings.Index(normalized[2:], "*/"); end >= 0 {
-				normalized = strings.TrimSpace(normalized[end+4:])
-				continue
-			}
-		}
-		break
-	}
-	return strings.HasPrefix(normalized, "set role") ||
-		strings.HasPrefix(normalized, "reset role") ||
-		strings.HasPrefix(normalized, "set session authorization") ||
-		strings.HasPrefix(normalized, "reset session authorization") ||
-		strings.HasPrefix(normalized, "discard all") ||
-		strings.Contains(normalized, "set_config('role'") ||
-		strings.Contains(normalized, `set_config("role"`) ||
-		strings.Contains(normalized, "set_config('session_authorization'")
 }
 
 // ExecSimple executes a trusted, parameter-free SQL script on the transaction's
@@ -383,6 +357,9 @@ func (s *transaction) Commit() error {
 		s.tx = nil
 		if err != nil {
 			s.schemaManager.invalidateCaches()
+			if s.topologyTouched && !errors.Is(err, pgx.ErrTxCommitRollback) && s.schemaManager.lifecycle.invalidateReady() {
+				s.schemaManager.clearValidatedBackends()
+			}
 			s.discardPending()
 			return err
 		}
